@@ -1,4 +1,5 @@
 use crate::{alloc::{GlobalAlloc, Layout, System}, cell::UnsafeCell};
+use super::abi::_HEAP_PTR;
 
 static mut BUMP_ALLOC: BumpAllocator = BumpAllocator::new();
 
@@ -11,18 +12,8 @@ unsafe impl GlobalAlloc for System {
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
 }
 
-extern "C" {
-    static _HEAP_PTR: u8;
-}
-
 pub struct BumpAllocator {
     offset: UnsafeCell<usize>,
-}
-
-unsafe impl Sync for BumpAllocator {}
-
-fn heap_start() -> usize {
-    unsafe { _HEAP_PTR as *const u8 as usize }
 }
 
 impl BumpAllocator {
@@ -49,6 +40,12 @@ unsafe impl GlobalAlloc for BumpAllocator {
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
 }
 
+unsafe impl Sync for BumpAllocator {}
+
 fn align_up(addr: usize, align: usize) -> usize {
     (addr + align - 1) & !(align - 1)
+}
+
+fn heap_start() -> usize {
+    unsafe { _HEAP_PTR as *const u8 as usize }
 }
