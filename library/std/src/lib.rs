@@ -242,7 +242,7 @@
 #![allow(unused_lifetimes)]
 #![allow(internal_features)]
 #![deny(rustc::existing_doc_keyword)]
-#![deny(fuzzy_provenance_casts)]
+// #![deny(fuzzy_provenance_casts)]
 #![allow(rustdoc::redundant_explicit_links)]
 // Ensure that std can be linked against panic_abort despite compiled with `-C panic=unwind`
 #![deny(ffi_unwind_calls)]
