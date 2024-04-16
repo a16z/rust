@@ -1,4 +1,4 @@
-//! System bindings for the risc0 zkvm platform
+//! System bindings for the jolt zkvm platform
 //!
 //! This module contains the facade (aka platform-specific) implementations of
 //! OS level functionality for zkvm.
@@ -7,11 +7,10 @@
 //! wide/production use yet, it's still all in the experimental category. This
 //! will likely change over time.
 
-const WORD_SIZE: usize = core::mem::size_of::<u32>();
-
 pub mod alloc;
-#[path = "../zkvm/args.rs"]
+#[path = "../unsupported/args.rs"]
 pub mod args;
+#[path = "../unsupported/env.rs"]
 pub mod env;
 #[path = "../unsupported/fs.rs"]
 pub mod fs;
@@ -19,11 +18,13 @@ pub mod fs;
 pub mod io;
 #[path = "../unsupported/net.rs"]
 pub mod net;
+#[path = "../unsupported/os.rs"]
 pub mod os;
 #[path = "../unsupported/pipe.rs"]
 pub mod pipe;
 #[path = "../unsupported/process.rs"]
 pub mod process;
+#[path = "../unsupported/stdio.rs"]
 pub mod stdio;
 pub mod thread_local_key;
 #[path = "../unsupported/time.rs"]
@@ -71,9 +72,11 @@ pub fn abort_internal() -> ! {
 }
 
 pub fn hashmap_random_keys() -> (u64, u64) {
-    let mut buf = [0u32; 4];
-    unsafe {
-        abi::sys_rand(buf.as_mut_ptr(), 4);
-    };
-    ((buf[0] as u64) << 32 + buf[1] as u64, (buf[2] as u64) << 32 + buf[3] as u64)
+    // let mut buf = [0u32; 4];
+    // unsafe {
+    //     abi::sys_rand(buf.as_mut_ptr(), 4);
+    // };
+    // (buf[0] as u64) << 32 + buf[1] as u64, (buf[2] as u64) << 32 + buf[3] as u64)
+
+    (0, 0)
 }
