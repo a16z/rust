@@ -49,12 +49,6 @@ jobs:
         working-directory: rust
 
       - name: Archive
-        run: make build-archive
+        run: tar -czvf rust-toolchain-${{ matrix.triple }}.tar.gz build/host/stage2
         working-directory: rust
 
-      - name: Archive build output
-        uses: actions/upload-artifact@v3
-        with:
-          name: rust-toolchain-${{ matrix.triple }}
-          path: |
-            rust/rust-toolchain-${{ matrix.triple }}.tar.gz
