@@ -97,4 +97,6 @@ tests/rustdoc-gui/src/**.lock
 flake.lock
 /default.nix
 
+# Arhive
+toolchain.tar.gz
 # Before adding new lines, see the comment at the top.
