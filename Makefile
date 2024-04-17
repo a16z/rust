@@ -8,3 +8,6 @@ install-toolchain:
 build-install-toolchain:
 	make build-toolchain
 	make install-toolchain
+
+archive:
+	tar -czvf toolchain.tar.gz build/host/stage2
