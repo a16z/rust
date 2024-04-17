@@ -42,7 +42,7 @@ jobs:
           submodules: "recursive"
           path: rust
           fetch-depth: 0
-          ref: jolt
+          ref: ci
 
       - name: Build
         run: make build-toolchain
