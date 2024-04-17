@@ -38,7 +38,7 @@ jobs:
       - name: Check out a16z/rust
         uses: actions/checkout@v3
         with:
-          repository: rust/a16z
+          repository: a16z/rust
           submodules: "recursive"
           path: rust
           fetch-depth: 0
