@@ -3,7 +3,7 @@ name: release
 on:
   workflow_call:
   workflow_dispatch:
-  pull_request:
+  push:
 
 jobs:
   build:
@@ -13,12 +13,12 @@ jobs:
         include:
           - os: macos-14
             triple: aarch64-apple-darwin
-          - os: macos-13
-            triple: x86_64-apple-darwin
-          - os: buildjet-32vcpu-ubuntu-2004
-            triple: x86_64-unknown-linux-gnu
-          - os: buildjet-32vcpu-ubuntu-2204-arm
-            triple: aarch64-unknown-linux-gnu
+              # - os: macos-13
+              #   triple: x86_64-apple-darwin
+              # - os: buildjet-32vcpu-ubuntu-2004
+              #   triple: x86_64-unknown-linux-gnu
+              # - os: buildjet-32vcpu-ubuntu-2204-arm
+              #   triple: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install nightly toolchain
@@ -42,7 +42,7 @@ jobs:
           submodules: "recursive"
           path: rust
           fetch-depth: 0
-          branch: jolt
+          ref: jolt
 
       - name: Build
         run: make build-toolchain
