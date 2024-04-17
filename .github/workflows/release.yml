@@ -1,0 +1,58 @@
+name: release
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            triple: aarch64-apple-darwin
+          - os: macos-13
+            triple: x86_64-apple-darwin
+          - os: buildjet-32vcpu-ubuntu-2004
+            triple: x86_64-unknown-linux-gnu
+          - os: buildjet-32vcpu-ubuntu-2204-arm
+            triple: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install nightly toolchain
+        id: rustc-toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly-2024-01-25
+          default: true
+
+      - uses: lukka/get-cmake@v3.27.4
+
+      - name: Show rust version
+        run: |
+          cargo version
+          rustup toolchain list
+
+      - name: Check out a16z/rust
+        uses: actions/checkout@v3
+        with:
+          repository: rust/a16z
+          submodules: "recursive"
+          path: rust
+          fetch-depth: 0
+
+      - name: Build
+        run: make build-toolchain
+        working-directory: rust
+
+      - name: Archive
+        run: make build-archive
+        working-directory: rust
+
+      - name: Archive build output
+        uses: actions/upload-artifact@v3
+        with:
+          name: rust-toolchain-${{ matrix.triple }}
+          path: |
+            rust/rust-toolchain-${{ matrix.triple }}.tar.gz
