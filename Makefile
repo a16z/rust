@@ -1,5 +1,6 @@
 build-toolchain:
-	CARGO_TARGET_RISCV32I_JOLT_ZKVM_ELF_RUSTFLAGS="-Cpasses=loweratomic" ./x build --stage 1
+	unset GITHUB_ACTIONS
+	CARGO_TARGET_RISCV32I_JOLT_ZKVM_ELF_RUSTFLAGS="-Cpasses=loweratomic" ./x build
 	CARGO_TARGET_RISCV32I_JOLT_ZKVM_ELF_RUSTFLAGS="-Cpasses=loweratomic" ./x build --stage 2
 
 install-toolchain:
