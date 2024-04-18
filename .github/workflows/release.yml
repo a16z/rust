@@ -1,0 +1,64 @@
+name: release
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            triple: aarch64-apple-darwin
+          - os: macos-13
+            triple: x86_64-apple-darwin
+          - os: ubuntu-latest
+            triple: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install nightly toolchain
+        id: rustc-toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly-2024-01-25
+          default: true
+
+      - uses: lukka/get-cmake@v3.27.4
+
+      - name: Show rust version
+        run: |
+          cargo version
+          rustup toolchain list
+
+      - name: Check out a16z/rust
+        uses: actions/checkout@v3
+        with:
+          repository: a16z/rust
+          submodules: "recursive"
+          path: rust
+          fetch-depth: 0
+          ref: jolt
+
+      - name: Build
+        run: make build-toolchain
+        working-directory: rust
+
+      - name: Archive
+        run: tar -czvf rust-toolchain-${{ matrix.triple }}.tar.gz rust/build/host/stage2
+
+      - name: Generate tag name
+        id: tag
+        run: |
+          echo "::set-output name=release_tag::nightly-${GITHUB_SHA}"
+
+      - name: Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ steps.tag.outputs.release_tag }}
+          prerelease: true
+          files: |
+            rust-toolchain-${{ matrix.triple }}.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
