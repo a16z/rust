@@ -3,7 +3,6 @@ name: release
 on:
   workflow_call:
   workflow_dispatch:
-  push:
 
 jobs:
   build:
@@ -40,7 +39,7 @@ jobs:
           submodules: "recursive"
           path: rust
           fetch-depth: 0
-          ref: ci
+          ref: jolt
 
       - name: Build
         run: make build-toolchain
