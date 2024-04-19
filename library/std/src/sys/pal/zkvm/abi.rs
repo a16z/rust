@@ -1,3 +1,3 @@
 extern "C" {
-    pub static _HEAP_PTR: u8;
+    pub fn sys_alloc(size: usize, align: usize) -> *mut u8;
 }
