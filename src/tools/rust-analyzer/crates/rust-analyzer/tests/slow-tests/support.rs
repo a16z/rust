@@ -9,7 +9,10 @@ use crossbeam_channel::{after, select, Receiver};
 use lsp_server::{Connection, Message, Notification, Request};
 use lsp_types::{notification::Exit, request::Shutdown, TextDocumentIdentifier, Url};
 use paths::{Utf8Path, Utf8PathBuf};
-use rust_analyzer::{config::Config, lsp, main_loop};
+use rust_analyzer::{
+    config::{Config, ConfigChange, ConfigErrors},
+    lsp, main_loop,
+};
 use serde::Serialize;
 use serde_json::{json, to_string_pretty, Value};
 use test_utils::FixtureWithProjectMeta;
@@ -24,6 +27,7 @@ pub(crate) struct Project<'a> {
     roots: Vec<Utf8PathBuf>,
     config: serde_json::Value,
     root_dir_contains_symlink: bool,
+    user_config_path: Option<Utf8PathBuf>,
 }
 
 impl Project<'_> {
@@ -47,7 +51,13 @@ impl Project<'_> {
                 }
             }),
             root_dir_contains_symlink: false,
+            user_config_path: None,
         }
+    }
+
+    pub(crate) fn user_config_dir(mut self, config_path_dir: TestDir) -> Self {
+        self.user_config_path = Some(config_path_dir.path().to_owned());
+        self
     }
 
     pub(crate) fn tmp_dir(mut self, tmp_dir: TestDir) -> Self {
@@ -111,10 +121,17 @@ impl Project<'_> {
         assert!(proc_macro_names.is_empty());
         assert!(mini_core.is_none());
         assert!(toolchain.is_none());
+
         for entry in fixture {
-            let path = tmp_dir.path().join(&entry.path['/'.len_utf8()..]);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path.as_path(), entry.text.as_bytes()).unwrap();
+            if let Some(pth) = entry.path.strip_prefix("/$$CONFIG_DIR$$") {
+                let path = self.user_config_path.clone().unwrap().join(&pth['/'.len_utf8()..]);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path.as_path(), entry.text.as_bytes()).unwrap();
+            } else {
+                let path = tmp_dir.path().join(&entry.path['/'.len_utf8()..]);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path.as_path(), entry.text.as_bytes()).unwrap();
+            }
         }
 
         let tmp_dir_path = AbsPathBuf::assert(tmp_dir.path().to_path_buf());
@@ -125,7 +142,7 @@ impl Project<'_> {
         }
 
         let mut config = Config::new(
-            tmp_dir_path,
+            tmp_dir_path.clone(),
             lsp_types::ClientCapabilities {
                 workspace: Some(lsp_types::WorkspaceClientCapabilities {
                     did_change_watched_files: Some(
@@ -159,6 +176,18 @@ impl Project<'_> {
                         content_format: Some(vec![lsp_types::MarkupKind::Markdown]),
                         ..Default::default()
                     }),
+                    inlay_hint: Some(lsp_types::InlayHintClientCapabilities {
+                        resolve_support: Some(lsp_types::InlayHintResolveClientCapabilities {
+                            properties: vec![
+                                "textEdits".to_owned(),
+                                "tooltip".to_owned(),
+                                "label.tooltip".to_owned(),
+                                "label.location".to_owned(),
+                                "label.command".to_owned(),
+                            ],
+                        }),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 }),
                 window: Some(lsp_types::WindowClientCapabilities {
@@ -172,11 +201,19 @@ impl Project<'_> {
             },
             roots,
             None,
+            self.user_config_path,
         );
-        config.update(self.config).expect("invalid config");
+        let mut change = ConfigChange::default();
+
+        change.change_client_config(self.config);
+
+        let error_sink: ConfigErrors;
+        (config, error_sink, _) = config.apply_change(change);
+        assert!(error_sink.is_empty(), "{error_sink:?}");
+
         config.rediscover_workspaces();
 
-        Server::new(tmp_dir, config)
+        Server::new(tmp_dir.keep(), config)
     }
 }
 
@@ -219,40 +256,6 @@ impl Server {
         self.send_notification(r)
     }
 
-    pub(crate) fn expect_notification<N>(&self, expected: Value)
-    where
-        N: lsp_types::notification::Notification,
-        N::Params: Serialize,
-    {
-        while let Some(Message::Notification(actual)) =
-            recv_timeout(&self.client.receiver).unwrap_or_else(|_| panic!("timed out"))
-        {
-            if actual.method == N::METHOD {
-                let actual = actual
-                    .clone()
-                    .extract::<Value>(N::METHOD)
-                    .expect("was not able to extract notification");
-
-                tracing::debug!(?actual, "got notification");
-                if let Some((expected_part, actual_part)) = find_mismatch(&expected, &actual) {
-                    panic!(
-                            "JSON mismatch\nExpected:\n{}\nWas:\n{}\nExpected part:\n{}\nActual part:\n{}\n",
-                            to_string_pretty(&expected).unwrap(),
-                            to_string_pretty(&actual).unwrap(),
-                            to_string_pretty(expected_part).unwrap(),
-                            to_string_pretty(actual_part).unwrap(),
-                        );
-                } else {
-                    tracing::debug!("successfully matched notification");
-                    return;
-                }
-            } else {
-                continue;
-            }
-        }
-        panic!("never got expected notification");
-    }
-
     #[track_caller]
     pub(crate) fn request<R>(&self, params: R::Params, expected_resp: Value)
     where
@@ -271,6 +274,7 @@ impl Server {
         }
     }
 
+    #[track_caller]
     pub(crate) fn send_request<R>(&self, params: R::Params) -> Value
     where
         R: lsp_types::request::Request,
@@ -282,6 +286,7 @@ impl Server {
         let r = Request::new(id.into(), R::METHOD.to_owned(), params);
         self.send_request_(r)
     }
+    #[track_caller]
     fn send_request_(&self, r: Request) -> Value {
         let id = r.id.clone();
         self.client.sender.send(r.clone().into()).unwrap();
@@ -349,9 +354,8 @@ impl Server {
     }
     fn recv(&self) -> Result<Option<Message>, Timeout> {
         let msg = recv_timeout(&self.client.receiver)?;
-        let msg = msg.map(|msg| {
+        let msg = msg.inspect(|msg| {
             self.messages.borrow_mut().push(msg.clone());
-            msg
         });
         Ok(msg)
     }
@@ -361,6 +365,16 @@ impl Server {
 
     pub(crate) fn path(&self) -> &Utf8Path {
         self.dir.path()
+    }
+
+    pub(crate) fn write_file_and_save(&self, path: &str, text: String) {
+        fs::write(self.dir.path().join(path), &text).unwrap();
+        self.notification::<lsp_types::notification::DidSaveTextDocument>(
+            lsp_types::DidSaveTextDocumentParams {
+                text_document: self.doc_id(path),
+                text: Some(text),
+            },
+        )
     }
 }
 

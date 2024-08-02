@@ -1,18 +1,17 @@
-pub use self::Mode::*;
-
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
-use std::fmt;
-use std::iter;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
+use std::sync::OnceLock;
+use std::{fmt, iter};
 
-use crate::util::{add_dylib_path, PathBufExt};
 use build_helper::git::GitConfig;
-use lazycell::AtomicLazyCell;
 use serde::de::{Deserialize, Deserializer, Error as _};
-use std::collections::{HashMap, HashSet};
 use test::{ColorConfig, OutputFormat};
+
+pub use self::Mode::*;
+use crate::util::{add_dylib_path, PathBufExt};
 
 macro_rules! string_enum {
     ($(#[$meta:meta])* $vis:vis enum $name:ident { $($variant:ident => $repr:expr,)* }) => {
@@ -69,6 +68,7 @@ string_enum! {
         Assembly => "assembly",
         CoverageMap => "coverage-map",
         CoverageRun => "coverage-run",
+        Crashes => "crashes",
     }
 }
 
@@ -186,9 +186,6 @@ pub struct Config {
     /// The rustdoc executable.
     pub rustdoc_path: Option<PathBuf>,
 
-    /// The rust-demangler executable.
-    pub rust_demangler_path: Option<PathBuf>,
-
     /// The coverage-dump executable.
     pub coverage_dump_path: Option<PathBuf>,
 
@@ -249,7 +246,7 @@ pub struct Config {
     /// Only run tests that match these filters
     pub filters: Vec<String>,
 
-    /// Skip tests tests matching these substrings. Corresponds to
+    /// Skip tests matching these substrings. Corresponds to
     /// `test::TestOpts::skip`. `filter_exact` does not apply to these flags.
     pub skip: Vec<String>,
 
@@ -380,10 +377,10 @@ pub struct Config {
     /// Whether to rerun tests even if the inputs are unchanged.
     pub force_rerun: bool,
 
-    /// Only rerun the tests that result has been modified accoring to Git status
+    /// Only rerun the tests that result has been modified according to Git status
     pub only_modified: bool,
 
-    pub target_cfgs: AtomicLazyCell<TargetCfgs>,
+    pub target_cfgs: OnceLock<TargetCfgs>,
 
     pub nocapture: bool,
 
@@ -405,13 +402,7 @@ impl Config {
     }
 
     pub fn target_cfgs(&self) -> &TargetCfgs {
-        match self.target_cfgs.borrow() {
-            Some(cfgs) => cfgs,
-            None => {
-                let _ = self.target_cfgs.fill(TargetCfgs::new(self));
-                self.target_cfgs.borrow().unwrap()
-            }
-        }
+        self.target_cfgs.get_or_init(|| TargetCfgs::new(self))
     }
 
     pub fn target_cfg(&self) -> &TargetCfg {
@@ -590,7 +581,7 @@ impl TargetCfgs {
                         name,
                         Some(
                             value
-                                .strip_suffix("\"")
+                                .strip_suffix('\"')
                                 .expect("key-value pair should be properly quoted"),
                         ),
                     )
@@ -768,8 +759,14 @@ pub fn output_testname_unique(
 /// test/revision should reside. Example:
 ///   /path/to/build/host-triple/test/ui/relative/testname.revision.mode/
 pub fn output_base_dir(config: &Config, testpaths: &TestPaths, revision: Option<&str>) -> PathBuf {
-    output_relative_path(config, &testpaths.relative_dir)
-        .join(output_testname_unique(config, testpaths, revision))
+    // In run-make tests, constructing a relative path + unique testname causes a double layering
+    // since revisions are not supported, causing unnecessary nesting.
+    if config.mode == Mode::RunMake {
+        output_relative_path(config, &testpaths.relative_dir)
+    } else {
+        output_relative_path(config, &testpaths.relative_dir)
+            .join(output_testname_unique(config, testpaths, revision))
+    }
 }
 
 /// Absolute path to the base filename used as output for the given

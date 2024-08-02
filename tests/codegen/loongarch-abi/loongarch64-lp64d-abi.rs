@@ -6,9 +6,12 @@
 #![no_std]
 #![no_core]
 
-#[lang="sized"] trait Sized { }
-#[lang="freeze"] trait Freeze { }
-#[lang="copy"] trait Copy { }
+#[lang = "sized"]
+trait Sized {}
+#[lang = "freeze"]
+trait Freeze {}
+#[lang = "copy"]
+trait Copy {}
 
 // CHECK: define void @f_fpr_tracking(double %0, double %1, double %2, double %3, double %4, double %5, double %6, double %7, i8 noundef zeroext %i)
 #[no_mangle]
@@ -260,7 +263,7 @@ pub struct IntDoubleInt {
 #[no_mangle]
 pub extern "C" fn f_int_double_int_s_arg(a: IntDoubleInt) {}
 
-// CHECK: define void @f_ret_int_double_int_s(ptr noalias nocapture noundef sret([24 x i8]) align 8 dereferenceable(24) %_0)
+// CHECK: define void @f_ret_int_double_int_s(ptr{{( dead_on_unwind)?}} noalias nocapture noundef{{( writable)?}} sret([24 x i8]) align 8 dereferenceable(24) %_0)
 #[no_mangle]
 pub extern "C" fn f_ret_int_double_int_s() -> IntDoubleInt {
     IntDoubleInt { a: 1, b: 2., c: 3 }

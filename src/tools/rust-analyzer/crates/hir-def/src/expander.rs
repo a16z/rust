@@ -6,11 +6,13 @@ use base_db::CrateId;
 use cfg::CfgOptions;
 use drop_bomb::DropBomb;
 use hir_expand::{
-    attrs::RawAttrs, mod_path::ModPath, span_map::SpanMap, ExpandError, ExpandResult, HirFileId,
-    InFile, MacroCallId,
+    attrs::RawAttrs, mod_path::ModPath, span_map::SpanMap, ExpandError, ExpandErrorKind,
+    ExpandResult, HirFileId, InFile, Lookup, MacroCallId,
 };
 use limit::Limit;
+use span::SyntaxContextId;
 use syntax::{ast, Parse};
+use triomphe::Arc;
 
 use crate::{
     attr::Attrs, db::DefDatabase, lower::LowerCtx, path::Path, AsMacroCall, MacroId, ModuleId,
@@ -19,9 +21,8 @@ use crate::{
 
 #[derive(Debug)]
 pub struct Expander {
-    cfg_options: CfgOptions,
+    cfg_options: Arc<CfgOptions>,
     span_map: OnceCell<SpanMap>,
-    krate: CrateId,
     current_file_id: HirFileId,
     pub(crate) module: ModuleId,
     /// `recursion_depth == usize::MAX` indicates that the recursion limit has been reached.
@@ -45,15 +46,23 @@ impl Expander {
             recursion_limit,
             cfg_options: db.crate_graph()[module.krate].cfg_options.clone(),
             span_map: OnceCell::new(),
-            krate: module.krate,
         }
+    }
+
+    pub fn krate(&self) -> CrateId {
+        self.module.krate
+    }
+
+    pub fn syntax_context(&self) -> SyntaxContextId {
+        // FIXME:
+        SyntaxContextId::ROOT
     }
 
     pub fn enter_expand<T: ast::AstNode>(
         &mut self,
         db: &dyn DefDatabase,
         macro_call: ast::MacroCall,
-        resolver: impl Fn(ModPath) -> Option<MacroId>,
+        resolver: impl Fn(&ModPath) -> Option<MacroId>,
     ) -> Result<ExpandResult<Option<(Mark, Parse<T>)>>, UnresolvedMacro> {
         // FIXME: within_limit should support this, instead of us having to extract the error
         let mut unresolved_macro_err = None;
@@ -112,7 +121,7 @@ impl Expander {
     pub(crate) fn parse_attrs(&self, db: &dyn DefDatabase, owner: &dyn ast::HasAttrs) -> Attrs {
         Attrs::filter(
             db,
-            self.krate,
+            self.krate(),
             RawAttrs::new(
                 db.upcast(),
                 owner,
@@ -151,26 +160,30 @@ impl Expander {
             // so don't return overflow error here to avoid diagnostics duplication.
             cov_mark::hit!(overflow_but_not_me);
             return ExpandResult::ok(None);
-        } else if self.recursion_limit.check(self.recursion_depth as usize + 1).is_err() {
-            self.recursion_depth = u32::MAX;
-            cov_mark::hit!(your_stack_belongs_to_me);
-            return ExpandResult::only_err(ExpandError::RecursionOverflow);
         }
 
         let ExpandResult { value, err } = op(self);
         let Some(call_id) = value else {
             return ExpandResult { value: None, err };
         };
+        if self.recursion_limit.check(self.recursion_depth as usize + 1).is_err() {
+            self.recursion_depth = u32::MAX;
+            cov_mark::hit!(your_stack_belongs_to_me);
+            return ExpandResult::only_err(ExpandError::new(
+                db.macro_arg_considering_derives(call_id, &call_id.lookup(db.upcast()).kind).2,
+                ExpandErrorKind::RecursionOverflow,
+            ));
+        }
 
         let macro_file = call_id.as_macro_file();
         let res = db.parse_macro_expansion(macro_file);
 
         let err = err.or(res.err);
         ExpandResult {
-            value: match err {
+            value: match &err {
                 // If proc-macro is disabled or unresolved, we want to expand to a missing expression
                 // instead of an empty tree which might end up in an empty block.
-                Some(ExpandError::UnresolvedProcMacro(_)) => None,
+                Some(e) if matches!(e.kind(), ExpandErrorKind::MissingProcMacroExpander(_)) => None,
                 _ => (|| {
                     let parse = res.value.0.cast::<T>()?;
 

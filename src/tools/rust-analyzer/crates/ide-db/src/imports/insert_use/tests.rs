@@ -1222,6 +1222,26 @@ use self::foo::{self, Bar, Foo};
     );
 }
 
+#[test]
+fn insert_with_double_colon_prefixed_import_merge() {
+    check_with_config(
+        "use ::ext::foo::Foo",
+        r#"
+use ::ext::foo::Foo as _;
+"#,
+        r#"
+use ::ext::foo::Foo;
+"#,
+        &InsertUseConfig {
+            granularity: ImportGranularity::Crate,
+            prefix_kind: hir::PrefixKind::BySelf,
+            enforce_granularity: true,
+            group: true,
+            skip_glob_imports: true,
+        },
+    );
+}
+
 fn check_with_config(
     path: &str,
     ra_fixture_before: &str,
@@ -1243,7 +1263,7 @@ fn check_with_config(
         .and_then(|it| ImportScope::find_insert_use_container(&it, sema))
         .or_else(|| ImportScope::from(syntax))
         .unwrap();
-    let path = ast::SourceFile::parse(&format!("use {path};"))
+    let path = ast::SourceFile::parse(&format!("use {path};"), span::Edition::CURRENT)
         .tree()
         .syntax()
         .descendants()
@@ -1292,14 +1312,14 @@ fn check_one(path: &str, ra_fixture_before: &str, ra_fixture_after: &str) {
 }
 
 fn check_merge_only_fail(ra_fixture0: &str, ra_fixture1: &str, mb: MergeBehavior) {
-    let use0 = ast::SourceFile::parse(ra_fixture0)
+    let use0 = ast::SourceFile::parse(ra_fixture0, span::Edition::CURRENT)
         .tree()
         .syntax()
         .descendants()
         .find_map(ast::Use::cast)
         .unwrap();
 
-    let use1 = ast::SourceFile::parse(ra_fixture1)
+    let use1 = ast::SourceFile::parse(ra_fixture1, span::Edition::CURRENT)
         .tree()
         .syntax()
         .descendants()
@@ -1311,7 +1331,7 @@ fn check_merge_only_fail(ra_fixture0: &str, ra_fixture1: &str, mb: MergeBehavior
 }
 
 fn check_guess(ra_fixture: &str, expected: ImportGranularityGuess) {
-    let syntax = ast::SourceFile::parse(ra_fixture).tree().syntax().clone();
+    let syntax = ast::SourceFile::parse(ra_fixture, span::Edition::CURRENT).tree().syntax().clone();
     let file = ImportScope::from(syntax).unwrap();
     assert_eq!(super::guess_granularity_from_scope(&file), expected);
 }

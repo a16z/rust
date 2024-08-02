@@ -1,8 +1,8 @@
-use rustc_errors::{
-    codes::*, Diag, DiagArgFromDisplay, EmissionGuarantee, SubdiagMessageOp, Subdiagnostic,
-};
+use rustc_errors::codes::*;
+use rustc_errors::{Diag, DiagArgFromDisplay, EmissionGuarantee, SubdiagMessageOp, Subdiagnostic};
 use rustc_macros::{Diagnostic, Subdiagnostic};
-use rustc_span::{symbol::Ident, Span, Symbol};
+use rustc_span::symbol::Ident;
+use rustc_span::{Span, Symbol};
 
 #[derive(Diagnostic)]
 #[diag(ast_lowering_generic_type_with_parentheses, code = E0214)]
@@ -44,7 +44,7 @@ impl Subdiagnostic for InvalidAbiReason {
     fn add_to_diag_with<G: EmissionGuarantee, F: SubdiagMessageOp<G>>(
         self,
         diag: &mut Diag<'_, G>,
-        _: F,
+        _: &F,
     ) {
         #[allow(rustc::untranslatable_diagnostic)]
         diag.note(self.0);
@@ -368,6 +368,8 @@ pub struct NeverPatternWithGuard {
 pub struct ArbitraryExpressionInPattern {
     #[primary_span]
     pub span: Span,
+    #[note(ast_lowering_pattern_from_macro_note)]
+    pub pattern_from_macro_note: bool,
 }
 
 #[derive(Diagnostic)]
@@ -389,6 +391,17 @@ pub enum BadReturnTypeNotation {
     Output {
         #[primary_span]
         #[suggestion(code = "", applicability = "maybe-incorrect")]
+        span: Span,
+    },
+    #[diag(ast_lowering_bad_return_type_notation_needs_dots)]
+    NeedsDots {
+        #[primary_span]
+        #[suggestion(code = "(..)", applicability = "maybe-incorrect")]
+        span: Span,
+    },
+    #[diag(ast_lowering_bad_return_type_notation_position)]
+    Position {
+        #[primary_span]
         span: Span,
     },
 }
@@ -413,4 +426,28 @@ pub(crate) struct AsyncBoundNotOnTrait {
 pub(crate) struct AsyncBoundOnlyForFnTraits {
     #[primary_span]
     pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_lowering_no_precise_captures_on_apit)]
+pub(crate) struct NoPreciseCapturesOnApit {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_lowering_no_precise_captures_on_rpitit)]
+#[note]
+pub(crate) struct NoPreciseCapturesOnRpitit {
+    #[primary_span]
+    pub span: Span,
+}
+
+#[derive(Diagnostic)]
+#[diag(ast_lowering_yield_in_closure)]
+pub(crate) struct YieldInClosure {
+    #[primary_span]
+    pub span: Span,
+    #[suggestion(code = "#[coroutine] ", applicability = "maybe-incorrect", style = "verbose")]
+    pub suggestion: Option<Span>,
 }

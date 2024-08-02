@@ -6,10 +6,10 @@ use crate::{lower::LowerCtx, type_ref::ConstRef};
 
 use hir_expand::{
     mod_path::resolve_crate_root,
-    name::{name, AsName},
+    name::{AsName, Name},
 };
-use intern::Interned;
-use syntax::ast::{self, AstNode, HasTypeBounds};
+use intern::{sym, Interned};
+use syntax::ast::{self, AstNode, HasGenericArgs, HasTypeBounds};
 
 use crate::{
     path::{AssociatedTypeBinding, GenericArg, GenericArgs, ModPath, Path, PathKind},
@@ -60,7 +60,7 @@ pub(super) fn lower_path(ctx: &LowerCtx<'_>, mut path: ast::Path) -> Option<Path
                 segments.push(name);
             }
             ast::PathSegmentKind::SelfTypeKw => {
-                segments.push(name![Self]);
+                segments.push(Name::new_symbol_root(sym::Self_.clone()));
             }
             ast::PathSegmentKind::Type { type_ref, trait_ref } => {
                 assert!(path.qualifier().is_none()); // this can only occur at the first segment
@@ -122,7 +122,7 @@ pub(super) fn lower_path(ctx: &LowerCtx<'_>, mut path: ast::Path) -> Option<Path
                 // don't break out if `self` is the last segment of a path, this mean we got a
                 // use tree like `foo::{self}` which we want to resolve as `foo`
                 if !segments.is_empty() {
-                    kind = PathKind::Super(0);
+                    kind = PathKind::SELF;
                     break;
                 }
             }
@@ -144,7 +144,7 @@ pub(super) fn lower_path(ctx: &LowerCtx<'_>, mut path: ast::Path) -> Option<Path
 
     if segments.is_empty() && kind == PathKind::Plain && type_anchor.is_none() {
         // plain empty paths don't exist, this means we got a single `self` segment as our path
-        kind = PathKind::Super(0);
+        kind = PathKind::SELF;
     }
 
     // handle local_inner_macros :
@@ -202,12 +202,21 @@ pub(super) fn lower_generic_args(
                     continue;
                 }
                 if let Some(name_ref) = assoc_type_arg.name_ref() {
+                    // Nested impl traits like `impl Foo<Assoc = impl Bar>` are allowed
+                    let _guard = lower_ctx.outer_impl_trait_scope(false);
                     let name = name_ref.as_name();
                     let args = assoc_type_arg
                         .generic_arg_list()
                         .and_then(|args| lower_generic_args(lower_ctx, args))
                         .map(Interned::new);
                     let type_ref = assoc_type_arg.ty().map(|it| TypeRef::from_ast(lower_ctx, it));
+                    let type_ref = type_ref.inspect(|tr| {
+                        tr.walk(&mut |tr| {
+                            if let TypeRef::ImplTrait(bounds) = tr {
+                                lower_ctx.update_impl_traits_bounds(bounds.clone());
+                            }
+                        });
+                    });
                     let bounds = if let Some(l) = assoc_type_arg.type_bound_list() {
                         l.bounds()
                             .map(|it| Interned::new(TypeBound::from_ast(lower_ctx, it)))
@@ -259,7 +268,7 @@ fn lower_generic_args_from_fn_path(
     let bindings = if let Some(ret_type) = ret_type {
         let type_ref = TypeRef::from_ast_opt(ctx, ret_type.ty());
         Box::new([AssociatedTypeBinding {
-            name: name![Output],
+            name: Name::new_symbol_root(sym::Output.clone()),
             args: None,
             type_ref: Some(type_ref),
             bounds: Box::default(),
@@ -268,7 +277,7 @@ fn lower_generic_args_from_fn_path(
         // -> ()
         let type_ref = TypeRef::Tuple(Vec::new());
         Box::new([AssociatedTypeBinding {
-            name: name![Output],
+            name: Name::new_symbol_root(sym::Output.clone()),
             args: None,
             type_ref: Some(type_ref),
             bounds: Box::default(),

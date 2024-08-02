@@ -1,9 +1,7 @@
 //@ only-wasm32-wasip1
 #![deny(warnings)]
 
-extern crate run_make_support;
-
-use run_make_support::{rustc, tmp_dir};
+use run_make_support::{rfs, rustc};
 
 fn main() {
     test("a");
@@ -15,9 +13,16 @@ fn main() {
 fn test(cfg: &str) {
     eprintln!("running cfg {cfg:?}");
 
-    rustc().input("foo.rs").target("wasm32-wasip1").arg("-Clto").opt().cfg(cfg).run();
+    rustc()
+        .input("foo.rs")
+        .target("wasm32-wasip1")
+        .arg("-Clto")
+        .arg("-Cstrip=debuginfo")
+        .opt()
+        .cfg(cfg)
+        .run();
 
-    let bytes = std::fs::read(&tmp_dir().join("foo.wasm")).unwrap();
+    let bytes = rfs::read("foo.wasm");
     println!("{}", bytes.len());
     assert!(bytes.len() < 40_000);
 }

@@ -1,10 +1,10 @@
 //! Defines database & queries for name resolution.
-use base_db::{salsa, CrateId, FileId, SourceDatabase, Upcast};
+use base_db::{salsa, CrateId, SourceDatabase, Upcast};
 use either::Either;
 use hir_expand::{db::ExpandDatabase, HirFileId, MacroDefId};
-use intern::Interned;
+use intern::{sym, Interned};
 use la_arena::ArenaMap;
-use span::MacroCallId;
+use span::{EditionedFileId, MacroCallId};
 use syntax::{ast, AstPtr};
 use triomphe::Arc;
 
@@ -12,7 +12,7 @@ use crate::{
     attr::{Attrs, AttrsWithOwner},
     body::{scope::ExprScopes, Body, BodySourceMap},
     data::{
-        adt::{EnumData, EnumVariantData, StructData},
+        adt::{EnumData, EnumVariantData, StructData, VariantData},
         ConstData, ExternCrateDeclData, FunctionData, ImplData, Macro2Data, MacroRulesData,
         ProcMacroData, StaticData, TraitAliasData, TraitData, TypeAliasData,
     },
@@ -80,9 +80,11 @@ pub trait InternDatabase: SourceDatabase {
 
 #[salsa::query_group(DefDatabaseStorage)]
 pub trait DefDatabase: InternDatabase + ExpandDatabase + Upcast<dyn ExpandDatabase> {
+    /// Whether to expand procedural macros during name resolution.
     #[salsa::input]
     fn expand_proc_attr_macros(&self) -> bool;
 
+    /// Computes an [`ItemTree`] for the given file or macro expansion.
     #[salsa::invoke(ItemTree::file_item_tree_query)]
     fn file_item_tree(&self, file_id: HirFileId) -> Arc<ItemTree>;
 
@@ -96,6 +98,7 @@ pub trait DefDatabase: InternDatabase + ExpandDatabase + Upcast<dyn ExpandDataba
     #[salsa::invoke(DefMap::block_def_map_query)]
     fn block_def_map(&self, block: BlockId) -> Arc<DefMap>;
 
+    /// Turns a MacroId into a MacroDefId, describing the macro's definition post name resolution.
     fn macro_def(&self, m: MacroId) -> MacroDefId;
 
     // region:data
@@ -127,6 +130,9 @@ pub trait DefDatabase: InternDatabase + ExpandDatabase + Upcast<dyn ExpandDataba
         id: EnumVariantId,
     ) -> (Arc<EnumVariantData>, DefDiagnostics);
 
+    #[salsa::transparent]
+    #[salsa::invoke(VariantData::variant_data)]
+    fn variant_data(&self, id: VariantId) -> Arc<VariantData>;
     #[salsa::transparent]
     #[salsa::invoke(ImplData::impl_data_query)]
     fn impl_data(&self, e: ImplId) -> Arc<ImplData>;
@@ -171,6 +177,7 @@ pub trait DefDatabase: InternDatabase + ExpandDatabase + Upcast<dyn ExpandDataba
     // endregion:data
 
     #[salsa::invoke(Body::body_with_source_map_query)]
+    #[salsa::lru]
     fn body_with_source_map(&self, def: DefWithBodyId) -> (Arc<Body>, Arc<BodySourceMap>);
 
     #[salsa::invoke(Body::body_query)]
@@ -187,6 +194,7 @@ pub trait DefDatabase: InternDatabase + ExpandDatabase + Upcast<dyn ExpandDataba
     #[salsa::invoke(Attrs::fields_attrs_query)]
     fn fields_attrs(&self, def: VariantId) -> Arc<ArenaMap<LocalFieldId, Attrs>>;
 
+    // should this really be a query?
     #[salsa::invoke(crate::attr::fields_attrs_source_map)]
     fn fields_attrs_source_map(
         &self,
@@ -232,11 +240,14 @@ pub trait DefDatabase: InternDatabase + ExpandDatabase + Upcast<dyn ExpandDataba
 
     fn crate_supports_no_std(&self, crate_id: CrateId) -> bool;
 
-    fn include_macro_invoc(&self, crate_id: CrateId) -> Vec<(MacroCallId, FileId)>;
+    fn include_macro_invoc(&self, crate_id: CrateId) -> Vec<(MacroCallId, EditionedFileId)>;
 }
 
 // return: macro call id and include file id
-fn include_macro_invoc(db: &dyn DefDatabase, krate: CrateId) -> Vec<(MacroCallId, FileId)> {
+fn include_macro_invoc(
+    db: &dyn DefDatabase,
+    krate: CrateId,
+) -> Vec<(MacroCallId, EditionedFileId)> {
     db.crate_def_map(krate)
         .modules
         .values()
@@ -250,13 +261,13 @@ fn include_macro_invoc(db: &dyn DefDatabase, krate: CrateId) -> Vec<(MacroCallId
 }
 
 fn crate_supports_no_std(db: &dyn DefDatabase, crate_id: CrateId) -> bool {
-    let file = db.crate_graph()[crate_id].root_file_id;
+    let file = db.crate_graph()[crate_id].root_file_id();
     let item_tree = db.file_item_tree(file.into());
     let attrs = item_tree.raw_attrs(AttrOwner::TopLevel);
     for attr in &**attrs {
-        match attr.path().as_ident().and_then(|id| id.as_text()) {
-            Some(ident) if ident == "no_std" => return true,
-            Some(ident) if ident == "cfg_attr" => {}
+        match attr.path().as_ident() {
+            Some(ident) if *ident == sym::no_std.clone() => return true,
+            Some(ident) if *ident == sym::cfg_attr.clone() => {}
             _ => continue,
         }
 
@@ -271,7 +282,7 @@ fn crate_supports_no_std(db: &dyn DefDatabase, crate_id: CrateId) -> bool {
             tt.split(|tt| matches!(tt, tt::TokenTree::Leaf(tt::Leaf::Punct(p)) if p.char == ','));
         for output in segments.skip(1) {
             match output {
-                [tt::TokenTree::Leaf(tt::Leaf::Ident(ident))] if ident.text == "no_std" => {
+                [tt::TokenTree::Leaf(tt::Leaf::Ident(ident))] if ident.sym == sym::no_std => {
                     return true
                 }
                 _ => {}
@@ -291,10 +302,10 @@ fn macro_def(db: &dyn DefDatabase, id: MacroId) -> MacroDefId {
         let in_file = InFile::new(file_id, m);
         match expander {
             MacroExpander::Declarative => MacroDefKind::Declarative(in_file),
-            MacroExpander::BuiltIn(it) => MacroDefKind::BuiltIn(it, in_file),
-            MacroExpander::BuiltInAttr(it) => MacroDefKind::BuiltInAttr(it, in_file),
-            MacroExpander::BuiltInDerive(it) => MacroDefKind::BuiltInDerive(it, in_file),
-            MacroExpander::BuiltInEager(it) => MacroDefKind::BuiltInEager(it, in_file),
+            MacroExpander::BuiltIn(it) => MacroDefKind::BuiltIn(in_file, it),
+            MacroExpander::BuiltInAttr(it) => MacroDefKind::BuiltInAttr(in_file, it),
+            MacroExpander::BuiltInDerive(it) => MacroDefKind::BuiltInDerive(in_file, it),
+            MacroExpander::BuiltInEager(it) => MacroDefKind::BuiltInEager(in_file, it),
         }
     };
 
@@ -335,9 +346,9 @@ fn macro_def(db: &dyn DefDatabase, id: MacroId) -> MacroDefId {
             MacroDefId {
                 krate: loc.container.krate,
                 kind: MacroDefKind::ProcMacro(
+                    InFile::new(loc.id.file_id(), makro.ast_id),
                     loc.expander,
                     loc.kind,
-                    InFile::new(loc.id.file_id(), makro.ast_id),
                 ),
                 local_inner: false,
                 allow_internal_unsafe: false,

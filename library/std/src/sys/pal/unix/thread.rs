@@ -1,16 +1,13 @@
-use crate::cmp;
 use crate::ffi::CStr;
-use crate::io;
-use crate::mem;
+use crate::mem::{self, ManuallyDrop};
 use crate::num::NonZero;
-use crate::ptr;
-use crate::sys::{os, stack_overflow};
-use crate::time::Duration;
-
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 use crate::sys::weak::dlsym;
 #[cfg(any(target_os = "solaris", target_os = "illumos", target_os = "nto"))]
 use crate::sys::weak::weak;
+use crate::sys::{os, stack_overflow};
+use crate::time::Duration;
+use crate::{cmp, io, ptr};
 #[cfg(not(any(target_os = "l4re", target_os = "vxworks", target_os = "espidf")))]
 pub const DEFAULT_MIN_STACK_SIZE: usize = 2 * 1024 * 1024;
 #[cfg(target_os = "l4re")]
@@ -150,13 +147,7 @@ impl Thread {
         }
     }
 
-    #[cfg(any(
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "watchos",
-        target_os = "visionos",
-        target_os = "tvos"
-    ))]
+    #[cfg(target_vendor = "apple")]
     pub fn set_name(name: &CStr) {
         unsafe {
             let name = truncate_cstr::<{ libc::MAXTHREADNAMESIZE }>(name);
@@ -274,11 +265,9 @@ impl Thread {
     }
 
     pub fn join(self) {
-        unsafe {
-            let ret = libc::pthread_join(self.id, ptr::null_mut());
-            mem::forget(self);
-            assert!(ret == 0, "failed to join thread: {}", io::Error::from_raw_os_error(ret));
-        }
+        let id = self.into_id();
+        let ret = unsafe { libc::pthread_join(id, ptr::null_mut()) };
+        assert!(ret == 0, "failed to join thread: {}", io::Error::from_raw_os_error(ret));
     }
 
     pub fn id(&self) -> libc::pthread_t {
@@ -286,9 +275,7 @@ impl Thread {
     }
 
     pub fn into_id(self) -> libc::pthread_t {
-        let id = self.id;
-        mem::forget(self);
-        id
+        ManuallyDrop::new(self).id
     }
 }
 
@@ -301,14 +288,10 @@ impl Drop for Thread {
 
 #[cfg(any(
     target_os = "linux",
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "tvos",
-    target_os = "watchos",
-    target_os = "visionos",
     target_os = "nto",
     target_os = "solaris",
     target_os = "illumos",
+    target_vendor = "apple",
 ))]
 fn truncate_cstr<const MAX_WITH_NUL: usize>(cstr: &CStr) -> [libc::c_char; MAX_WITH_NUL] {
     let mut result = [0; MAX_WITH_NUL];
@@ -325,11 +308,9 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
             target_os = "emscripten",
             target_os = "fuchsia",
             target_os = "hurd",
-            target_os = "ios",
-            target_os = "tvos",
             target_os = "linux",
-            target_os = "macos",
             target_os = "aix",
+            target_vendor = "apple",
         ))] {
             #[allow(unused_assignments)]
             #[allow(unused_mut)]
@@ -356,7 +337,7 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
             }
             match unsafe { libc::sysconf(libc::_SC_NPROCESSORS_ONLN) } {
                 -1 => Err(io::Error::last_os_error()),
-                0 => Err(io::const_io_error!(io::ErrorKind::NotFound, "The number of hardware threads is not known for the target platform")),
+                0 => Err(io::Error::UNKNOWN_THREAD_COUNT),
                 cpus => {
                     let count = cpus as usize;
                     // Cover the unusual situation where we were able to get the quota but not the affinity mask
@@ -439,7 +420,7 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
                 if res == -1 {
                     return Err(io::Error::last_os_error());
                 } else if cpus == 0 {
-                    return Err(io::const_io_error!(io::ErrorKind::NotFound, "The number of hardware threads is not known for the target platform"));
+                    return Err(io::Error::UNKNOWN_THREAD_COUNT);
                 }
             }
 
@@ -452,13 +433,13 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
                 } else {
                     let cpus = (*_syspage_ptr).num_cpu;
                     NonZero::new(cpus as usize)
-                        .ok_or(io::const_io_error!(io::ErrorKind::NotFound, "The number of hardware threads is not known for the target platform"))
+                        .ok_or(io::Error::UNKNOWN_THREAD_COUNT)
                 }
             }
         } else if #[cfg(any(target_os = "solaris", target_os = "illumos"))] {
             let mut cpus = 0u32;
             if unsafe { libc::pset_info(libc::PS_MYID, core::ptr::null_mut(), &mut cpus, core::ptr::null_mut()) } != 0 {
-                return Err(io::const_io_error!(io::ErrorKind::NotFound, "The number of hardware threads is not known for the target platform"));
+                return Err(io::Error::UNKNOWN_THREAD_COUNT);
             }
             Ok(unsafe { NonZero::new_unchecked(cpus as usize) })
         } else if #[cfg(target_os = "haiku")] {
@@ -469,7 +450,7 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
                 let res = libc::get_system_info(&mut sinfo);
 
                 if res != libc::B_OK {
-                    return Err(io::const_io_error!(io::ErrorKind::NotFound, "The number of hardware threads is not known for the target platform"));
+                    return Err(io::Error::UNKNOWN_THREAD_COUNT);
                 }
 
                 Ok(NonZero::new_unchecked(sinfo.cpu_count as usize))
@@ -487,14 +468,13 @@ mod cgroups {
     //! * cgroup v2 in non-standard mountpoints
     //! * paths containing control characters or spaces, since those would be escaped in procfs
     //!   output and we don't unescape
+
     use crate::borrow::Cow;
     use crate::ffi::OsString;
-    use crate::fs::{try_exists, File};
-    use crate::io::Read;
-    use crate::io::{BufRead, BufReader};
+    use crate::fs::{exists, File};
+    use crate::io::{BufRead, BufReader, Read};
     use crate::os::unix::ffi::OsStringExt;
-    use crate::path::Path;
-    use crate::path::PathBuf;
+    use crate::path::{Path, PathBuf};
     use crate::str::from_utf8;
 
     #[derive(PartialEq)]
@@ -567,7 +547,7 @@ mod cgroups {
         path.push("cgroup.controllers");
 
         // skip if we're not looking at cgroup2
-        if matches!(try_exists(&path), Err(_) | Ok(false)) {
+        if matches!(exists(&path), Err(_) | Ok(false)) {
             return usize::MAX;
         };
 
@@ -624,7 +604,7 @@ mod cgroups {
             path.push(&group_path);
 
             // skip if we guessed the mount incorrectly
-            if matches!(try_exists(&path), Err(_) | Ok(false)) {
+            if matches!(exists(&path), Err(_) | Ok(false)) {
                 continue;
             }
 
@@ -709,7 +689,7 @@ mod cgroups {
 // is created in an application with big thread-local storage requirements.
 // See #6233 for rationale and details.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
-fn min_stack_size(attr: *const libc::pthread_attr_t) -> usize {
+unsafe fn min_stack_size(attr: *const libc::pthread_attr_t) -> usize {
     // We use dlsym to avoid an ELF version dependency on GLIBC_PRIVATE. (#23628)
     // We shouldn't really be using such an internal symbol, but there's currently
     // no other way to account for the TLS size.
@@ -723,11 +703,20 @@ fn min_stack_size(attr: *const libc::pthread_attr_t) -> usize {
 
 // No point in looking up __pthread_get_minstack() on non-glibc platforms.
 #[cfg(all(not(all(target_os = "linux", target_env = "gnu")), not(target_os = "netbsd")))]
-fn min_stack_size(_: *const libc::pthread_attr_t) -> usize {
+unsafe fn min_stack_size(_: *const libc::pthread_attr_t) -> usize {
     libc::PTHREAD_STACK_MIN
 }
 
 #[cfg(target_os = "netbsd")]
-fn min_stack_size(_: *const libc::pthread_attr_t) -> usize {
-    2048 // just a guess
+unsafe fn min_stack_size(_: *const libc::pthread_attr_t) -> usize {
+    static STACK: crate::sync::OnceLock<usize> = crate::sync::OnceLock::new();
+
+    *STACK.get_or_init(|| {
+        let mut stack = unsafe { libc::sysconf(libc::_SC_THREAD_STACK_MIN) };
+        if stack < 0 {
+            stack = 2048; // just a guess
+        }
+
+        stack as usize
+    })
 }

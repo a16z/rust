@@ -1,6 +1,3 @@
-use crate::deriving::generic::ty::*;
-use crate::deriving::generic::*;
-use crate::deriving::path_std;
 use rustc_ast::{self as ast, Generics, ItemKind, MetaItem, VariantData};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_expand::base::{Annotatable, ExtCtxt};
@@ -8,7 +5,11 @@ use rustc_span::symbol::{kw, sym, Ident};
 use rustc_span::Span;
 use thin_vec::{thin_vec, ThinVec};
 
-pub fn expand_deriving_clone(
+use crate::deriving::generic::ty::*;
+use crate::deriving::generic::*;
+use crate::deriving::path_std;
+
+pub(crate) fn expand_deriving_clone(
     cx: &ExtCtxt<'_>,
     span: Span,
     mitem: &MetaItem,
@@ -181,8 +182,8 @@ fn cs_clone(
             all_fields = af;
             vdata = &variant.data;
         }
-        EnumTag(..) | AllFieldlessEnum(..) => {
-            cx.dcx().span_bug(trait_span, format!("enum tags in `derive({name})`",))
+        EnumDiscr(..) | AllFieldlessEnum(..) => {
+            cx.dcx().span_bug(trait_span, format!("enum discriminants in `derive({name})`",))
         }
         StaticEnum(..) | StaticStruct(..) => {
             cx.dcx().span_bug(trait_span, format!("associated function in `derive({name})`"))

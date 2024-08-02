@@ -1,15 +1,17 @@
+use std::{fmt, iter};
+
 use rustc_hir::lang_items::LangItem;
 use rustc_index::Idx;
 use rustc_middle::mir::patch::MirPatch;
 use rustc_middle::mir::*;
+use rustc_middle::span_bug;
 use rustc_middle::traits::Reveal;
 use rustc_middle::ty::util::IntTypeExt;
-use rustc_middle::ty::GenericArgsRef;
-use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::ty::{self, GenericArgsRef, Ty, TyCtxt};
 use rustc_span::source_map::Spanned;
 use rustc_span::DUMMY_SP;
 use rustc_target::abi::{FieldIdx, VariantIdx, FIRST_VARIANT};
-use std::{fmt, iter};
+use tracing::{debug, instrument};
 
 /// The value of an inserted drop flag.
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -452,8 +454,7 @@ where
             });
         }
 
-        let skip_contents =
-            adt.is_union() || Some(adt.did()) == self.tcx().lang_items().manually_drop();
+        let skip_contents = adt.is_union() || adt.is_manually_drop();
         let contents_drop = if skip_contents {
             (self.succ, self.unwind)
         } else {
@@ -630,7 +631,7 @@ where
 
         let ref_ty = Ty::new_mut_ref(tcx, tcx.lifetimes.re_erased, ty);
         let ref_place = self.new_temp(ref_ty);
-        let unit_temp = Place::from(self.new_temp(Ty::new_unit(tcx)));
+        let unit_temp = Place::from(self.new_temp(tcx.types.unit));
 
         let result = BasicBlockData {
             statements: vec![self.assign(
@@ -649,10 +650,8 @@ where
                         [ty.into()],
                         self.source_info.span,
                     ),
-                    args: vec![Spanned {
-                        node: Operand::Move(Place::from(ref_place)),
-                        span: DUMMY_SP,
-                    }],
+                    args: [Spanned { node: Operand::Move(Place::from(ref_place)), span: DUMMY_SP }]
+                        .into(),
                     destination: unit_temp,
                     target: Some(succ),
                     unwind: unwind.into_action(),

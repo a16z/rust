@@ -6,8 +6,6 @@
 // addition to `cargo check`. Either split it into 3 crates (one for test, one for check
 // and one common utilities) or change its name and docs to reflect the current state.
 
-#![warn(rust_2018_idioms, unused_lifetimes)]
-
 use std::{fmt, io, process::Command, time::Duration};
 
 use crossbeam_channel::{never, select, unbounded, Receiver, Sender};
@@ -22,10 +20,11 @@ pub use cargo_metadata::diagnostic::{
 use toolchain::Tool;
 
 mod command;
+pub mod project_json;
 mod test_runner;
 
 use command::{CommandHandle, ParseFromLine};
-pub use test_runner::{CargoTestHandle, CargoTestMessage, TestState};
+pub use test_runner::{CargoTestHandle, CargoTestMessage, TestState, TestTarget};
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum InvocationStrategy {
@@ -42,18 +41,49 @@ pub enum InvocationLocation {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CargoOptions {
+    pub target_triples: Vec<String>,
+    pub all_targets: bool,
+    pub no_default_features: bool,
+    pub all_features: bool,
+    pub features: Vec<String>,
+    pub extra_args: Vec<String>,
+    pub extra_env: FxHashMap<String, String>,
+    pub target_dir: Option<Utf8PathBuf>,
+}
+
+impl CargoOptions {
+    fn apply_on_command(&self, cmd: &mut Command) {
+        for target in &self.target_triples {
+            cmd.args(["--target", target.as_str()]);
+        }
+        if self.all_targets {
+            cmd.arg("--all-targets");
+        }
+        if self.all_features {
+            cmd.arg("--all-features");
+        } else {
+            if self.no_default_features {
+                cmd.arg("--no-default-features");
+            }
+            if !self.features.is_empty() {
+                cmd.arg("--features");
+                cmd.arg(self.features.join(" "));
+            }
+        }
+        if let Some(target_dir) = &self.target_dir {
+            cmd.arg("--target-dir").arg(target_dir);
+        }
+        cmd.envs(&self.extra_env);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FlycheckConfig {
     CargoCommand {
         command: String,
-        target_triples: Vec<String>,
-        all_targets: bool,
-        no_default_features: bool,
-        all_features: bool,
-        features: Vec<String>,
-        extra_args: Vec<String>,
-        extra_env: FxHashMap<String, String>,
+        options: CargoOptions,
         ansi_color_output: bool,
-        target_dir: Option<Utf8PathBuf>,
     },
     CustomCommand {
         command: String,
@@ -94,8 +124,10 @@ impl FlycheckHandle {
         config: FlycheckConfig,
         sysroot_root: Option<AbsPathBuf>,
         workspace_root: AbsPathBuf,
+        manifest_path: Option<AbsPathBuf>,
     ) -> FlycheckHandle {
-        let actor = FlycheckActor::new(id, sender, config, sysroot_root, workspace_root);
+        let actor =
+            FlycheckActor::new(id, sender, config, sysroot_root, workspace_root, manifest_path);
         let (sender, receiver) = unbounded::<StateChange>();
         let thread = stdx::thread::Builder::new(stdx::thread::ThreadIntent::Worker)
             .name("Flycheck".to_owned())
@@ -130,6 +162,9 @@ pub enum Message {
     /// Request adding a diagnostic with fixes included to a file
     AddDiagnostic { id: usize, workspace_root: AbsPathBuf, diagnostic: Diagnostic },
 
+    /// Request clearing all previous diagnostics
+    ClearDiagnostics { id: usize },
+
     /// Request check progress notification to client
     Progress {
         /// Flycheck instance ID
@@ -147,6 +182,9 @@ impl fmt::Debug for Message {
                 .field("workspace_root", workspace_root)
                 .field("diagnostic_code", &diagnostic.code.as_ref().map(|it| &it.code))
                 .finish(),
+            Message::ClearDiagnostics { id } => {
+                f.debug_struct("ClearDiagnostics").field("id", id).finish()
+            }
             Message::Progress { id, progress } => {
                 f.debug_struct("Progress").field("id", id).field("progress", progress).finish()
             }
@@ -174,6 +212,7 @@ struct FlycheckActor {
     id: usize,
     sender: Box<dyn Fn(Message) + Send>,
     config: FlycheckConfig,
+    manifest_path: Option<AbsPathBuf>,
     /// Either the workspace root of the workspace we are flychecking,
     /// or the project root of the project.
     root: AbsPathBuf,
@@ -184,6 +223,10 @@ struct FlycheckActor {
     /// have to wrap sub-processes output handling in a thread and pass messages
     /// back over a channel.
     command_handle: Option<CommandHandle<CargoCheckMessage>>,
+    /// The receiver side of the channel mentioned above.
+    command_receiver: Option<Receiver<CargoCheckMessage>>,
+
+    status: FlycheckStatus,
 }
 
 enum Event {
@@ -191,7 +234,14 @@ enum Event {
     CheckEvent(Option<CargoCheckMessage>),
 }
 
-const SAVED_FILE_PLACEHOLDER: &str = "$saved_file";
+#[derive(PartialEq)]
+enum FlycheckStatus {
+    Started,
+    DiagnosticSent,
+    Finished,
+}
+
+pub const SAVED_FILE_PLACEHOLDER: &str = "$saved_file";
 
 impl FlycheckActor {
     fn new(
@@ -200,6 +250,7 @@ impl FlycheckActor {
         config: FlycheckConfig,
         sysroot_root: Option<AbsPathBuf>,
         workspace_root: AbsPathBuf,
+        manifest_path: Option<AbsPathBuf>,
     ) -> FlycheckActor {
         tracing::info!(%id, ?workspace_root, "Spawning flycheck");
         FlycheckActor {
@@ -208,7 +259,10 @@ impl FlycheckActor {
             config,
             sysroot_root,
             root: workspace_root,
+            manifest_path,
             command_handle: None,
+            command_receiver: None,
+            status: FlycheckStatus::Finished,
         }
     }
 
@@ -217,14 +271,13 @@ impl FlycheckActor {
     }
 
     fn next_event(&self, inbox: &Receiver<StateChange>) -> Option<Event> {
-        let check_chan = self.command_handle.as_ref().map(|cargo| &cargo.receiver);
         if let Ok(msg) = inbox.try_recv() {
             // give restarts a preference so check outputs don't block a restart or stop
             return Some(Event::RequestStateChange(msg));
         }
         select! {
             recv(inbox) -> msg => msg.ok().map(Event::RequestStateChange),
-            recv(check_chan.unwrap_or(&never())) -> msg => Some(Event::CheckEvent(msg.ok())),
+            recv(self.command_receiver.as_ref().unwrap_or(&never())) -> msg => Some(Event::CheckEvent(msg.ok())),
         }
     }
 
@@ -250,20 +303,23 @@ impl FlycheckActor {
                             Some(c) => c,
                             None => continue,
                         };
-                    let formatted_command = format!("{:?}", command);
+                    let formatted_command = format!("{command:?}");
 
                     tracing::debug!(?command, "will restart flycheck");
-                    match CommandHandle::spawn(command) {
+                    let (sender, receiver) = unbounded();
+                    match CommandHandle::spawn(command, sender) {
                         Ok(command_handle) => {
-                            tracing::debug!(command = formatted_command, "did  restart flycheck");
+                            tracing::debug!(command = formatted_command, "did restart flycheck");
                             self.command_handle = Some(command_handle);
+                            self.command_receiver = Some(receiver);
                             self.report_progress(Progress::DidStart);
+                            self.status = FlycheckStatus::Started;
                         }
                         Err(error) => {
                             self.report_progress(Progress::DidFailToRestart(format!(
-                                "Failed to run the following command: {} error={}",
-                                formatted_command, error
+                                "Failed to run the following command: {formatted_command} error={error}"
                             )));
+                            self.status = FlycheckStatus::Finished;
                         }
                     }
                 }
@@ -272,16 +328,22 @@ impl FlycheckActor {
 
                     // Watcher finished
                     let command_handle = self.command_handle.take().unwrap();
-                    let formatted_handle = format!("{:?}", command_handle);
+                    self.command_receiver.take();
+                    let formatted_handle = format!("{command_handle:?}");
 
                     let res = command_handle.join();
-                    if res.is_err() {
+                    if let Err(error) = &res {
                         tracing::error!(
-                            "Flycheck failed to run the following command: {}",
-                            formatted_handle
+                            "Flycheck failed to run the following command: {}, error={}",
+                            formatted_handle,
+                            error
                         );
                     }
+                    if self.status == FlycheckStatus::Started {
+                        self.send(Message::ClearDiagnostics { id: self.id });
+                    }
                     self.report_progress(Progress::DidFinish(res));
+                    self.status = FlycheckStatus::Finished;
                 }
                 Event::CheckEvent(Some(message)) => match message {
                     CargoCheckMessage::CompilerArtifact(msg) => {
@@ -299,11 +361,15 @@ impl FlycheckActor {
                             message = msg.message,
                             "diagnostic received"
                         );
+                        if self.status == FlycheckStatus::Started {
+                            self.send(Message::ClearDiagnostics { id: self.id });
+                        }
                         self.send(Message::AddDiagnostic {
                             id: self.id,
                             workspace_root: self.root.clone(),
                             diagnostic: msg,
                         });
+                        self.status = FlycheckStatus::DiagnosticSent;
                     }
                 },
             }
@@ -319,7 +385,9 @@ impl FlycheckActor {
                 "did  cancel flycheck"
             );
             command_handle.cancel();
+            self.command_receiver.take();
             self.report_progress(Progress::DidCancel);
+            self.status = FlycheckStatus::Finished;
         }
     }
 
@@ -332,18 +400,7 @@ impl FlycheckActor {
         saved_file: Option<&AbsPath>,
     ) -> Option<Command> {
         let (mut cmd, args) = match &self.config {
-            FlycheckConfig::CargoCommand {
-                command,
-                target_triples,
-                no_default_features,
-                all_targets,
-                all_features,
-                extra_args,
-                features,
-                extra_env,
-                ansi_color_output,
-                target_dir,
-            } => {
+            FlycheckConfig::CargoCommand { command, options, ansi_color_output } => {
                 let mut cmd = Command::new(Tool::Cargo.path());
                 if let Some(sysroot_root) = &self.sysroot_root {
                     cmd.env("RUSTUP_TOOLCHAIN", AsRef::<std::path::Path>::as_ref(sysroot_root));
@@ -362,31 +419,18 @@ impl FlycheckActor {
                     "--message-format=json"
                 });
 
-                cmd.arg("--manifest-path");
-                cmd.arg(self.root.join("Cargo.toml"));
+                if let Some(manifest_path) = &self.manifest_path {
+                    cmd.arg("--manifest-path");
+                    cmd.arg(manifest_path);
+                    if manifest_path.extension().map_or(false, |ext| ext == "rs") {
+                        cmd.arg("-Zscript");
+                    }
+                }
 
-                for target in target_triples {
-                    cmd.args(["--target", target.as_str()]);
-                }
-                if *all_targets {
-                    cmd.arg("--all-targets");
-                }
-                if *all_features {
-                    cmd.arg("--all-features");
-                } else {
-                    if *no_default_features {
-                        cmd.arg("--no-default-features");
-                    }
-                    if !features.is_empty() {
-                        cmd.arg("--features");
-                        cmd.arg(features.join(" "));
-                    }
-                }
-                if let Some(target_dir) = target_dir {
-                    cmd.arg("--target-dir").arg(target_dir);
-                }
-                cmd.envs(extra_env);
-                (cmd, extra_args.clone())
+                cmd.arg("--keep-going");
+
+                options.apply_on_command(&mut cmd);
+                (cmd, options.extra_args.clone())
             }
             FlycheckConfig::CustomCommand {
                 command,

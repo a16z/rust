@@ -1,13 +1,16 @@
 //! Checks that all Flunt files have messages in alphabetical order
 
-use crate::walk::{filter_dirs, walk};
 use std::collections::HashMap;
-use std::{fs::OpenOptions, io::Write, path::Path};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::Path;
 
 use regex::Regex;
 
-lazy_static::lazy_static! {
-    static ref MESSAGE: Regex = Regex::new(r#"(?m)^([a-zA-Z0-9_]+)\s*=\s*"#).unwrap();
+use crate::walk::{filter_dirs, walk};
+
+fn message() -> &'static Regex {
+    static_regex!(r#"(?m)^([a-zA-Z0-9_]+)\s*=\s*"#)
 }
 
 fn filter_fluent(path: &Path) -> bool {
@@ -20,7 +23,7 @@ fn check_alphabetic(
     bad: &mut bool,
     all_defined_msgs: &mut HashMap<String, String>,
 ) {
-    let mut matches = MESSAGE.captures_iter(fluent).peekable();
+    let mut matches = message().captures_iter(fluent).peekable();
     while let Some(m) = matches.next() {
         let name = m.get(1).unwrap();
         if let Some(defined_filename) = all_defined_msgs.get(name.as_str()) {
@@ -60,7 +63,7 @@ fn sort_messages(
     let mut chunks = vec![];
     let mut cur = String::new();
     for line in fluent.lines() {
-        if let Some(name) = MESSAGE.find(line) {
+        if let Some(name) = message().find(line) {
             if let Some(defined_filename) = all_defined_msgs.get(name.as_str()) {
                 tidy_error!(
                     bad,

@@ -4,11 +4,12 @@
 //! let _x /* i32 */= f(4, 4);
 //! ```
 use hir::Semantics;
-use ide_db::{base_db::FileId, famous_defs::FamousDefs, RootDatabase};
+use ide_db::{famous_defs::FamousDefs, RootDatabase};
 
 use itertools::Itertools;
+use span::EditionedFileId;
 use syntax::{
-    ast::{self, AstNode, HasName},
+    ast::{self, AstNode, HasGenericArgs, HasName},
     match_ast,
 };
 
@@ -21,7 +22,7 @@ pub(super) fn hints(
     acc: &mut Vec<InlayHint>,
     famous_defs @ FamousDefs(sema, _): &FamousDefs<'_, '_>,
     config: &InlayHintsConfig,
-    _file_id: FileId,
+    _file_id: EditionedFileId,
     pat: &ast::IdentPat,
 ) -> Option<()> {
     if !config.type_hints {
@@ -332,6 +333,25 @@ fn main(a: SliceIter<'_, Container>) {
     }
 
     #[test]
+    fn lt_hints() {
+        check_types(
+            r#"
+struct S<'lt>;
+
+fn f<'a>() {
+    let x = S::<'static>;
+      //^ S<'static>
+    let y = S::<'_>;
+      //^ S
+    let z = S::<'a>;
+      //^ S<'a>
+
+}
+"#,
+        );
+    }
+
+    #[test]
     fn fn_hints() {
         check_types(
             r#"
@@ -341,7 +361,7 @@ fn foo1() -> impl Fn(f64) { loop {} }
 fn foo2() -> impl Fn(f64, f64) { loop {} }
 fn foo3() -> impl Fn(f64, f64) -> u32 { loop {} }
 fn foo4() -> &'static dyn Fn(f64, f64) -> u32 { loop {} }
-fn foo5() -> &'static dyn Fn(&'static dyn Fn(f64, f64) -> u32, f64) -> u32 { loop {} }
+fn foo5() -> &'static for<'a> dyn Fn(&'a dyn Fn(f64, f64) -> u32, f64) -> u32 { loop {} }
 fn foo6() -> impl Fn(f64, f64) -> u32 + Sized { loop {} }
 fn foo7() -> *const (impl Fn(f64, f64) -> u32 + Sized) { loop {} }
 
@@ -1099,6 +1119,32 @@ fn test() {
     let f = |a: S<usize>| S(a);
 }
 "#,
+        );
+    }
+
+    #[test]
+    fn type_hints_async_block() {
+        check_types(
+            r#"
+//- minicore: future
+async fn main() {
+    let _x = async { 8_i32 };
+      //^^ impl Future<Output = i32>
+}"#,
+        );
+    }
+
+    #[test]
+    fn type_hints_async_block_with_tail_return_exp() {
+        check_types(
+            r#"
+//- minicore: future
+async fn main() {
+    let _x = async {
+      //^^ impl Future<Output = i32>
+        return 8_i32;
+    };
+}"#,
         );
     }
 }

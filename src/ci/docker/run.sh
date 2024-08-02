@@ -27,13 +27,22 @@ do
   shift
 done
 
+# MacOS reports "arm64" while Linux reports "aarch64". Commonize this.
+machine="$(uname -m | sed 's/arm64/aarch64/')"
+
 script_dir="`dirname $script`"
-docker_dir="${script_dir}/host-$(uname -m)"
+docker_dir="${script_dir}/host-${machine}"
 ci_dir="`dirname $script_dir`"
 src_dir="`dirname $ci_dir`"
 root_dir="`dirname $src_dir`"
 
-objdir=$root_dir/obj
+source "$ci_dir/shared.sh"
+
+if isCI; then
+    objdir=$root_dir/obj
+else
+    objdir=$root_dir/obj/$image
+fi
 dist=$objdir/build/dist
 
 
@@ -41,44 +50,38 @@ if [ -d "$root_dir/.git" ]; then
     IS_GIT_SOURCE=1
 fi
 
-source "$ci_dir/shared.sh"
-
 CACHE_DOMAIN="${CACHE_DOMAIN:-ci-caches.rust-lang.org}"
 
 if [ -f "$docker_dir/$image/Dockerfile" ]; then
-    if [ "$CI" != "" ]; then
-      hash_key=/tmp/.docker-hash-key.txt
-      rm -f "${hash_key}"
-      echo $image >> $hash_key
+    hash_key=/tmp/.docker-hash-key.txt
+    rm -f "${hash_key}"
+    echo $image >> $hash_key
 
-      cat "$docker_dir/$image/Dockerfile" >> $hash_key
-      # Look for all source files involves in the COPY command
-      copied_files=/tmp/.docker-copied-files.txt
-      rm -f "$copied_files"
-      for i in $(sed -n -e '/^COPY --from=/! s/^COPY \(.*\) .*$/\1/p' \
-          "$docker_dir/$image/Dockerfile"); do
-        # List the file names
-        find "$script_dir/$i" -type f >> $copied_files
-      done
-      # Sort the file names and cat the content into the hash key
-      sort $copied_files | xargs cat >> $hash_key
+    cat "$docker_dir/$image/Dockerfile" >> $hash_key
+    # Look for all source files involves in the COPY command
+    copied_files=/tmp/.docker-copied-files.txt
+    rm -f "$copied_files"
+    for i in $(sed -n -e '/^COPY --from=/! s/^COPY \(.*\) .*$/\1/p' \
+      "$docker_dir/$image/Dockerfile"); do
+    # List the file names
+    find "$script_dir/$i" -type f >> $copied_files
+    done
+    # Sort the file names and cat the content into the hash key
+    sort $copied_files | xargs cat >> $hash_key
 
-      # Include the architecture in the hash key, since our Linux CI does not
-      # only run in x86_64 machines.
-      uname -m >> $hash_key
+    # Include the architecture in the hash key, since our Linux CI does not
+    # only run in x86_64 machines.
+    echo "$machine" >> $hash_key
 
-      docker --version >> $hash_key
+    # Include cache version. Can be used to manually bust the Docker cache.
+    echo "2" >> $hash_key
 
-      # Include cache version. Can be used to manually bust the Docker cache.
-      echo "2" >> $hash_key
+    echo "Image input"
+    cat $hash_key
 
-      echo "Image input"
-      cat $hash_key
-
-      cksum=$(sha512sum $hash_key | \
-        awk '{print $1}')
-      echo "Image input checksum ${cksum}"
-    fi
+    cksum=$(sha512sum $hash_key | \
+    awk '{print $1}')
+    echo "Image input checksum ${cksum}"
 
     dockerfile="$docker_dir/$image/Dockerfile"
     if [ -x /usr/bin/cygpath ]; then
@@ -93,18 +96,25 @@ if [ -f "$docker_dir/$image/Dockerfile" ]; then
     docker --version
 
     REGISTRY=ghcr.io
-    # PR CI runs on rust-lang, but we want to use the cache from rust-lang-ci
-    REGISTRY_USERNAME=rust-lang-ci
+    REGISTRY_USERNAME=${GITHUB_REPOSITORY_OWNER:-rust-lang-ci}
     # Tag used to push the final Docker image, so that it can be pulled by e.g. rustup
     IMAGE_TAG=${REGISTRY}/${REGISTRY_USERNAME}/rust-ci:${cksum}
     # Tag used to cache the Docker build
     # It seems that it cannot be the same as $IMAGE_TAG, otherwise it overwrites the cache
     CACHE_IMAGE_TAG=${REGISTRY}/${REGISTRY_USERNAME}/rust-ci-cache:${cksum}
 
-    # On non-CI jobs, we don't do any caching.
-    if [[ "$CI" == "" ]];
+    # On non-CI jobs, we try to download a pre-built image from the rust-lang-ci
+    # ghcr.io registry. If it is not possible, we fall back to building the image
+    # locally.
+    if ! isCI;
     then
-        retry docker build --rm -t rust-ci -f "$dockerfile" "$context"
+        if docker pull "${IMAGE_TAG}"; then
+            echo "Downloaded Docker image from CI"
+            docker tag "${IMAGE_TAG}" rust-ci
+        else
+            echo "Building local Docker image"
+            retry docker build --rm -t rust-ci -f "$dockerfile" "$context"
+        fi
     # On PR CI jobs, we don't have permissions to write to the registry cache,
     # but we can still read from it.
     elif [[ "$PR_CI_JOB" == "1" ]];
@@ -171,7 +181,7 @@ elif [ -f "$docker_dir/disabled/$image/Dockerfile" ]; then
       build \
       --rm \
       -t rust-ci \
-      -f "host-$(uname -m)/$image/Dockerfile" \
+      -f "host-${machine}/$image/Dockerfile" \
       -
 else
     echo Invalid image: $image
@@ -194,7 +204,7 @@ else
         else
             continue
         fi
-        echo "Note: the current host architecture is $(uname -m)"
+        echo "Note: the current host architecture is $machine"
     done
 
     exit 1
@@ -262,7 +272,6 @@ else
   args="$args --volume $root_dir:/checkout$SRC_MOUNT_OPTION"
   args="$args --volume $objdir:/checkout/obj"
   args="$args --volume $HOME/.cargo:/cargo"
-  args="$args --volume $HOME/rustsrc:$HOME/rustsrc"
   args="$args --volume /tmp/toolstate:/tmp/toolstate"
 
   id=$(id -u)
@@ -289,7 +298,7 @@ else
   command=(/checkout/src/ci/run.sh)
 fi
 
-if [ "$CI" != "" ]; then
+if isCI; then
   # Get some needed information for $BASE_COMMIT
   #
   # This command gets the last merge commit which we'll use as base to list
@@ -339,7 +348,9 @@ docker \
   rust-ci \
   "${command[@]}"
 
-cat $objdir/${SUMMARY_FILE} >> "${GITHUB_STEP_SUMMARY}"
+if isCI; then
+    cat $objdir/${SUMMARY_FILE} >> "${GITHUB_STEP_SUMMARY}"
+fi
 
 if [ -f /.dockerenv ]; then
   rm -rf $objdir

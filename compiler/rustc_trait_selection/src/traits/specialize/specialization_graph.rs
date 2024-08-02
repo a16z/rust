@@ -1,16 +1,17 @@
-use super::OverlapError;
-
-use crate::traits;
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir::def_id::DefId;
+use rustc_macros::extension;
+use rustc_middle::bug;
+pub use rustc_middle::traits::specialization_graph::*;
 use rustc_middle::ty::fast_reject::{self, SimplifiedType, TreatParams};
 use rustc_middle::ty::{self, TyCtxt, TypeVisitableExt};
 
-pub use rustc_middle::traits::specialization_graph::*;
+use super::OverlapError;
+use crate::traits;
 
 #[derive(Copy, Clone, Debug)]
 pub enum FutureCompatOverlapErrorKind {
-    Issue33140,
+    OrderDepTraitObjects,
     LeakCheck,
 }
 
@@ -149,10 +150,10 @@ impl<'tcx> Children {
                 {
                     match overlap_kind {
                         ty::ImplOverlapKind::Permitted { marker: _ } => {}
-                        ty::ImplOverlapKind::Issue33140 => {
+                        ty::ImplOverlapKind::FutureCompatOrderDepTraitObjects => {
                             *last_lint_mut = Some(FutureCompatOverlapError {
                                 error: create_overlap_error(overlap),
-                                kind: FutureCompatOverlapErrorKind::Issue33140,
+                                kind: FutureCompatOverlapErrorKind::OrderDepTraitObjects,
                             });
                         }
                     }

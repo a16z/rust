@@ -23,9 +23,12 @@
 #![no_std]
 #![no_core]
 
-#[lang="sized"] trait Sized { }
-#[lang="freeze"] trait Freeze { }
-#[lang="copy"] trait Copy { }
+#[lang = "sized"]
+trait Sized {}
+#[lang = "freeze"]
+trait Freeze {}
+#[lang = "copy"]
+trait Copy {}
 
 impl Copy for i32 {}
 impl Copy for i64 {}
@@ -58,7 +61,7 @@ pub struct ForceAlign4 {
 pub struct NaturalAlign8 {
     a: i64,
     b: i64,
-    c: i64
+    c: i64,
 }
 
 // On i686-windows, this is passed by reference (because alignment is >4 and requested/forced),
@@ -68,7 +71,7 @@ pub struct NaturalAlign8 {
 pub struct ForceAlign8 {
     a: i64,
     b: i64,
-    c: i64
+    c: i64,
 }
 
 // On i686-windows, this is passed on stack, because requested alignment is <=4.
@@ -77,28 +80,28 @@ pub struct ForceAlign8 {
 pub struct LowerFA8 {
     a: i64,
     b: i64,
-    c: i64
+    c: i64,
 }
 
 // On i686-windows, this is passed by reference, because it contains a field with
 // requested/forced alignment.
 #[repr(C)]
 pub struct WrappedFA8 {
-    a: ForceAlign8
+    a: ForceAlign8,
 }
 
 // On i686-windows, this has the same ABI as ForceAlign8, i.e. passed by reference.
 #[repr(transparent)]
 pub struct TransparentFA8 {
     _0: (),
-    a: ForceAlign8
+    a: ForceAlign8,
 }
 
 #[repr(C)]
 #[repr(align(16))]
 pub struct ForceAlign16 {
     a: [i32; 16],
-    b: i8
+    b: i8,
 }
 
 // CHECK-LABEL: @call_na1
@@ -106,20 +109,20 @@ pub struct ForceAlign16 {
 pub unsafe fn call_na1(x: NaturalAlign1) {
     // CHECK: start:
 
-    // m68k: [[ALLOCA:%[a-z0-9+]]] = alloca %NaturalAlign1, align 1
+    // m68k: [[ALLOCA:%[a-z0-9+]]] = alloca [2 x i8], align 1
     // m68k: call void @natural_align_1({{.*}}byval([2 x i8]) align 1{{.*}} [[ALLOCA]])
 
-    // wasm: [[ALLOCA:%[a-z0-9+]]] = alloca %NaturalAlign1, align 1
+    // wasm: [[ALLOCA:%[a-z0-9+]]] = alloca [2 x i8], align 1
     // wasm: call void @natural_align_1({{.*}}byval([2 x i8]) align 1{{.*}} [[ALLOCA]])
 
     // x86_64-linux: call void @natural_align_1(i16
 
     // x86_64-windows: call void @natural_align_1(i16
 
-    // i686-linux: [[ALLOCA:%[a-z0-9+]]] = alloca %NaturalAlign1, align 4
+    // i686-linux: [[ALLOCA:%[a-z0-9+]]] = alloca [2 x i8], align 4
     // i686-linux: call void @natural_align_1({{.*}}byval([2 x i8]) align 4{{.*}} [[ALLOCA]])
 
-    // i686-windows: [[ALLOCA:%[a-z0-9+]]] = alloca %NaturalAlign1, align 4
+    // i686-windows: [[ALLOCA:%[a-z0-9+]]] = alloca [2 x i8], align 4
     // i686-windows: call void @natural_align_1({{.*}}byval([2 x i8]) align 4{{.*}} [[ALLOCA]])
     natural_align_1(x);
 }
@@ -134,10 +137,10 @@ pub unsafe fn call_na2(x: NaturalAlign2) {
     // x86_64-linux-NEXT: call void @natural_align_2
     // x86_64-windows-NEXT: call void @natural_align_2
 
-    // i686-linux: [[ALLOCA:%[0-9]+]] = alloca %NaturalAlign2, align 4
+    // i686-linux: [[ALLOCA:%[0-9]+]] = alloca [34 x i8], align 4
     // i686-linux: call void @natural_align_2({{.*}}byval([34 x i8]) align 4{{.*}} [[ALLOCA]])
 
-    // i686-windows: [[ALLOCA:%[0-9]+]] = alloca %NaturalAlign2, align 4
+    // i686-windows: [[ALLOCA:%[0-9]+]] = alloca [34 x i8], align 4
     // i686-windows: call void @natural_align_2({{.*}}byval([34 x i8]) align 4{{.*}} [[ALLOCA]])
     natural_align_2(x);
 }

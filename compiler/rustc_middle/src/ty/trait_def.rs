@@ -1,21 +1,27 @@
-use crate::traits::specialization_graph;
-use crate::ty::fast_reject::{self, SimplifiedType, TreatParams, TreatProjections};
-use crate::ty::{Ident, Ty, TyCtxt};
-use hir::def_id::LOCAL_CRATE;
-use rustc_hir as hir;
-use rustc_hir::def_id::DefId;
 use std::iter;
 
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_errors::ErrorGuaranteed;
-use rustc_macros::HashStable;
+use rustc_hir as hir;
+use rustc_hir::def::DefKind;
+use rustc_hir::def_id::{DefId, LOCAL_CRATE};
+use rustc_macros::{Decodable, Encodable, HashStable};
+use tracing::debug;
+
+use crate::query::LocalCrate;
+use crate::traits::specialization_graph;
+use crate::ty::fast_reject::{self, SimplifiedType, TreatParams};
+use crate::ty::{Ident, Ty, TyCtxt};
 
 /// A trait's definition with type information.
 #[derive(HashStable, Encodable, Decodable)]
 pub struct TraitDef {
     pub def_id: DefId,
 
-    pub unsafety: hir::Unsafety,
+    pub safety: hir::Safety,
+
+    /// Whether this trait has been annotated with `#[const_trait]`.
+    pub constness: hir::Constness,
 
     /// If `true`, then this trait had the `#[rustc_paren_sugar]`
     /// attribute, indicating that it should be used with `Foo()`
@@ -30,7 +36,7 @@ pub struct TraitDef {
     /// and thus `impl`s of it are allowed to overlap.
     pub is_marker: bool,
 
-    /// If `true`, then this trait has to `#[rustc_coinductive]` attribute or
+    /// If `true`, then this trait has the `#[rustc_coinductive]` attribute or
     /// is an auto trait. This indicates that trait solver cycles involving an
     /// `X: ThisTrait` goal are accepted.
     ///
@@ -39,10 +45,20 @@ pub struct TraitDef {
     /// also have already switched to the new trait solver.
     pub is_coinductive: bool,
 
-    /// If `true`, then this trait has the `#[rustc_skip_array_during_method_dispatch]`
+    /// If `true`, then this trait has the `#[fundamental]` attribute. This
+    /// affects how conherence computes whether a trait may have trait implementations
+    /// added in the future.
+    pub is_fundamental: bool,
+
+    /// If `true`, then this trait has the `#[rustc_skip_during_method_dispatch(array)]`
     /// attribute, indicating that editions before 2021 should not consider this trait
     /// during method dispatch if the receiver is an array.
     pub skip_array_during_method_dispatch: bool,
+
+    /// If `true`, then this trait has the `#[rustc_skip_during_method_dispatch(boxed_slice)]`
+    /// attribute, indicating that editions before 2024 should not consider this trait
+    /// during method dispatch if the receiver is a boxed slice.
+    pub skip_boxed_slice_during_method_dispatch: bool,
 
     /// Used to determine whether the standard library is allowed to specialize
     /// on this trait.
@@ -135,21 +151,6 @@ impl<'tcx> TyCtxt<'tcx> {
         self,
         trait_def_id: DefId,
         self_ty: Ty<'tcx>,
-        f: impl FnMut(DefId),
-    ) {
-        self.for_each_relevant_impl_treating_projections(
-            trait_def_id,
-            self_ty,
-            TreatProjections::ForLookup,
-            f,
-        )
-    }
-
-    pub fn for_each_relevant_impl_treating_projections(
-        self,
-        trait_def_id: DefId,
-        self_ty: Ty<'tcx>,
-        treat_projections: TreatProjections,
         mut f: impl FnMut(DefId),
     ) {
         // FIXME: This depends on the set of all impls for the trait. That is
@@ -163,17 +164,13 @@ impl<'tcx> TyCtxt<'tcx> {
             f(impl_def_id);
         }
 
-        // Note that we're using `TreatParams::ForLookup` to query `non_blanket_impls` while using
-        // `TreatParams::AsCandidateKey` while actually adding them.
-        let treat_params = match treat_projections {
-            TreatProjections::NextSolverLookup => TreatParams::NextSolverLookup,
-            TreatProjections::ForLookup => TreatParams::ForLookup,
-        };
         // This way, when searching for some impl for `T: Trait`, we do not look at any impls
         // whose outer level is not a parameter or projection. Especially for things like
         // `T: Clone` this is incredibly useful as we would otherwise look at all the impls
         // of `Clone` for `Option<T>`, `Vec<T>`, `ConcreteType` and so on.
-        if let Some(simp) = fast_reject::simplify_type(self, self_ty, treat_params) {
+        // Note that we're using `TreatParams::ForLookup` to query `non_blanket_impls` while using
+        // `TreatParams::AsCandidateKey` while actually adding them.
+        if let Some(simp) = fast_reject::simplify_type(self, self_ty, TreatParams::ForLookup) {
             if let Some(impls) = impls.non_blanket_impls.get(&simp) {
                 for &impl_def_id in impls {
                     f(impl_def_id);
@@ -278,4 +275,28 @@ pub(super) fn incoherent_impls_provider(
     res?;
 
     Ok(tcx.arena.alloc_slice(&impls))
+}
+
+pub(super) fn traits_provider(tcx: TyCtxt<'_>, _: LocalCrate) -> &[DefId] {
+    let mut traits = Vec::new();
+    for id in tcx.hir().items() {
+        if matches!(tcx.def_kind(id.owner_id), DefKind::Trait | DefKind::TraitAlias) {
+            traits.push(id.owner_id.to_def_id())
+        }
+    }
+
+    tcx.arena.alloc_slice(&traits)
+}
+
+pub(super) fn trait_impls_in_crate_provider(tcx: TyCtxt<'_>, _: LocalCrate) -> &[DefId] {
+    let mut trait_impls = Vec::new();
+    for id in tcx.hir().items() {
+        if matches!(tcx.def_kind(id.owner_id), DefKind::Impl { .. })
+            && tcx.impl_trait_ref(id.owner_id).is_some()
+        {
+            trait_impls.push(id.owner_id.to_def_id())
+        }
+    }
+
+    tcx.arena.alloc_slice(&trait_impls)
 }

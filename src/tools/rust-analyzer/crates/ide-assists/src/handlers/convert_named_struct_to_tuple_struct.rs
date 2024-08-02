@@ -85,7 +85,7 @@ fn edit_struct_def(
     strukt: &Either<ast::Struct, ast::Variant>,
     record_fields: ast::RecordFieldList,
 ) {
-    // Note that we don't need to consider macro files in this function because this this is
+    // Note that we don't need to consider macro files in this function because this is
     // currently not triggered for struct definitions inside macro calls.
     let tuple_fields = record_fields
         .fields()
@@ -143,7 +143,7 @@ fn edit_struct_references(
     let usages = strukt_def.usages(&ctx.sema).include_self_refs().all();
 
     for (file_id, refs) in usages {
-        edit.edit_file(file_id);
+        edit.edit_file(file_id.file_id());
         for r in refs {
             process_struct_name_reference(ctx, r, edit);
         }
@@ -221,7 +221,7 @@ fn edit_field_references(
         let def = Definition::Field(field);
         let usages = def.usages(&ctx.sema).all();
         for (file_id, refs) in usages {
-            edit.edit_file(file_id);
+            edit.edit_file(file_id.file_id());
             for r in refs {
                 if let Some(name_ref) = r.name.as_name_ref() {
                     // Only edit the field reference if it's part of a `.field` access

@@ -1,5 +1,3 @@
-//@revisions: stack tree
-//@[tree]compile-flags: -Zmiri-tree-borrows
 //@compile-flags: -Zmiri-permissive-provenance
 
 fn ensure_allocs_can_be_adjacent() {
@@ -30,7 +28,7 @@ fn test1() {
         // See https://github.com/rust-lang/miri/issues/1866#issuecomment-985770125
         {
             let m = 0u64;
-            let _ = &m as *const u64;
+            let _ptr = &m as *const u64;
         }
 
         let iptr = ptr as usize;

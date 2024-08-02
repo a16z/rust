@@ -1,20 +1,15 @@
-use std::fmt;
-use std::iter;
 use std::marker::PhantomData;
-use std::mem;
 use std::ops::{BitAnd, BitAndAssign, BitOrAssign, Bound, Not, Range, RangeBounds, Shl};
 use std::rc::Rc;
-use std::slice;
+use std::{fmt, iter, mem, slice};
 
 use arrayvec::ArrayVec;
-use smallvec::{smallvec, SmallVec};
-
 #[cfg(feature = "nightly")]
 use rustc_macros::{Decodable_Generic, Encodable_Generic};
+use smallvec::{smallvec, SmallVec};
+use Chunk::*;
 
 use crate::{Idx, IndexVec};
-
-use Chunk::*;
 
 #[cfg(test)]
 mod tests;
@@ -400,7 +395,7 @@ enum Chunk {
 }
 
 // This type is used a lot. Make sure it doesn't unintentionally get bigger.
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 crate::static_assert_size!(Chunk, 16);
 
 impl<T> ChunkedBitSet<T> {

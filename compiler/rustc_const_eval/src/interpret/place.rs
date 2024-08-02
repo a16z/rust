@@ -5,18 +5,17 @@
 use std::assert_matches::assert_matches;
 
 use either::{Either, Left, Right};
-
 use rustc_ast::Mutability;
-use rustc_middle::mir;
-use rustc_middle::ty;
 use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_middle::ty::Ty;
+use rustc_middle::{bug, mir, span_bug};
 use rustc_target::abi::{Abi, Align, HasDataLayout, Size};
+use tracing::{instrument, trace};
 
 use super::{
     alloc_range, mir_assign_valid_types, AllocRef, AllocRefMut, CheckAlignMsg, CtfeProvenance,
     ImmTy, Immediate, InterpCx, InterpResult, Machine, MemoryKind, Misalignment, OffsetMode, OpTy,
-    Operand, Pointer, PointerArithmetic, Projectable, Provenance, Readable, Scalar,
+    Operand, Pointer, Projectable, Provenance, Readable, Scalar,
 };
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq, Debug)]
@@ -74,20 +73,17 @@ impl<Prov: Provenance> MemPlace<Prov> {
 
     #[inline]
     // Not called `offset_with_meta` to avoid confusion with the trait method.
-    fn offset_with_meta_<'mir, 'tcx, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    fn offset_with_meta_<'tcx, M: Machine<'tcx, Provenance = Prov>>(
         self,
         offset: Size,
         mode: OffsetMode,
         meta: MemPlaceMeta<Prov>,
-        ecx: &InterpCx<'mir, 'tcx, M>,
+        ecx: &InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, Self> {
         debug_assert!(
             !meta.has_meta() || self.meta.has_meta(),
             "cannot use `offset_with_meta` to add metadata to a place"
         );
-        if offset > ecx.data_layout().max_size_of_val() {
-            throw_ub!(PointerArithOverflow);
-        }
         let ptr = match mode {
             OffsetMode::Inbounds => {
                 ecx.ptr_offset_inbounds(self.ptr, offset.bytes().try_into().unwrap())?
@@ -159,20 +155,20 @@ impl<'tcx, Prov: Provenance> Projectable<'tcx, Prov> for MPlaceTy<'tcx, Prov> {
         self.mplace.meta
     }
 
-    fn offset_with_meta<'mir, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    fn offset_with_meta<M: Machine<'tcx, Provenance = Prov>>(
         &self,
         offset: Size,
         mode: OffsetMode,
         meta: MemPlaceMeta<Prov>,
         layout: TyAndLayout<'tcx>,
-        ecx: &InterpCx<'mir, 'tcx, M>,
+        ecx: &InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, Self> {
         Ok(MPlaceTy { mplace: self.mplace.offset_with_meta_(offset, mode, meta, ecx)?, layout })
     }
 
-    fn to_op<'mir, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    fn to_op<M: Machine<'tcx, Provenance = Prov>>(
         &self,
-        _ecx: &InterpCx<'mir, 'tcx, M>,
+        _ecx: &InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, OpTy<'tcx, M::Provenance>> {
         Ok(self.clone().into())
     }
@@ -271,13 +267,13 @@ impl<'tcx, Prov: Provenance> Projectable<'tcx, Prov> for PlaceTy<'tcx, Prov> {
         }
     }
 
-    fn offset_with_meta<'mir, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    fn offset_with_meta<M: Machine<'tcx, Provenance = Prov>>(
         &self,
         offset: Size,
         mode: OffsetMode,
         meta: MemPlaceMeta<Prov>,
         layout: TyAndLayout<'tcx>,
-        ecx: &InterpCx<'mir, 'tcx, M>,
+        ecx: &InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, Self> {
         Ok(match self.as_mplace_or_local() {
             Left(mplace) => mplace.offset_with_meta(offset, mode, meta, layout, ecx)?.into(),
@@ -289,10 +285,8 @@ impl<'tcx, Prov: Provenance> Projectable<'tcx, Prov> for PlaceTy<'tcx, Prov> {
                 // projections are type-checked and bounds-checked.
                 assert!(offset + layout.size <= self.layout.size);
 
-                let new_offset = Size::from_bytes(
-                    ecx.data_layout()
-                        .offset(old_offset.unwrap_or(Size::ZERO).bytes(), offset.bytes())?,
-                );
+                // Size `+`, ensures no overflow.
+                let new_offset = old_offset.unwrap_or(Size::ZERO) + offset;
 
                 PlaceTy {
                     place: Place::Local { local, offset: Some(new_offset), locals_addr },
@@ -302,9 +296,9 @@ impl<'tcx, Prov: Provenance> Projectable<'tcx, Prov> for PlaceTy<'tcx, Prov> {
         })
     }
 
-    fn to_op<'mir, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    fn to_op<M: Machine<'tcx, Provenance = Prov>>(
         &self,
-        ecx: &InterpCx<'mir, 'tcx, M>,
+        ecx: &InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, OpTy<'tcx, M::Provenance>> {
         ecx.place_to_op(self)
     }
@@ -338,9 +332,9 @@ pub trait Writeable<'tcx, Prov: Provenance>: Projectable<'tcx, Prov> {
         &self,
     ) -> Either<MPlaceTy<'tcx, Prov>, (mir::Local, Option<Size>, usize, TyAndLayout<'tcx>)>;
 
-    fn force_mplace<'mir, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    fn force_mplace<M: Machine<'tcx, Provenance = Prov>>(
         &self,
-        ecx: &mut InterpCx<'mir, 'tcx, M>,
+        ecx: &mut InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, MPlaceTy<'tcx, Prov>>;
 }
 
@@ -354,9 +348,9 @@ impl<'tcx, Prov: Provenance> Writeable<'tcx, Prov> for PlaceTy<'tcx, Prov> {
     }
 
     #[inline(always)]
-    fn force_mplace<'mir, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    fn force_mplace<M: Machine<'tcx, Provenance = Prov>>(
         &self,
-        ecx: &mut InterpCx<'mir, 'tcx, M>,
+        ecx: &mut InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, MPlaceTy<'tcx, Prov>> {
         ecx.force_allocation(self)
     }
@@ -371,19 +365,19 @@ impl<'tcx, Prov: Provenance> Writeable<'tcx, Prov> for MPlaceTy<'tcx, Prov> {
     }
 
     #[inline(always)]
-    fn force_mplace<'mir, M: Machine<'mir, 'tcx, Provenance = Prov>>(
+    fn force_mplace<M: Machine<'tcx, Provenance = Prov>>(
         &self,
-        _ecx: &mut InterpCx<'mir, 'tcx, M>,
+        _ecx: &mut InterpCx<'tcx, M>,
     ) -> InterpResult<'tcx, MPlaceTy<'tcx, Prov>> {
         Ok(self.clone())
     }
 }
 
 // FIXME: Working around https://github.com/rust-lang/rust/issues/54385
-impl<'mir, 'tcx: 'mir, Prov, M> InterpCx<'mir, 'tcx, M>
+impl<'tcx, Prov, M> InterpCx<'tcx, M>
 where
     Prov: Provenance,
-    M: Machine<'mir, 'tcx, Provenance = Prov>,
+    M: Machine<'tcx, Provenance = Prov>,
 {
     pub fn ptr_with_meta_to_mplace(
         &self,
@@ -415,7 +409,7 @@ where
         val: &ImmTy<'tcx, M::Provenance>,
     ) -> InterpResult<'tcx, MPlaceTy<'tcx, M::Provenance>> {
         let pointee_type =
-            val.layout.ty.builtin_deref(true).expect("`ref_to_mplace` called on non-ptr type").ty;
+            val.layout.ty.builtin_deref(true).expect("`ref_to_mplace` called on non-ptr type");
         let layout = self.layout_of(pointee_type)?;
         let (ptr, meta) = val.to_scalar_and_meta();
 
@@ -439,7 +433,7 @@ where
 
     /// Take an operand, representing a pointer, and dereference it to a place.
     /// Corresponds to the `*` operator in Rust.
-    #[instrument(skip(self), level = "debug")]
+    #[instrument(skip(self), level = "trace")]
     pub fn deref_pointer(
         &self,
         src: &impl Readable<'tcx, M::Provenance>,
@@ -496,13 +490,14 @@ where
         &self,
         mplace: &MPlaceTy<'tcx, M::Provenance>,
     ) -> InterpResult<'tcx, (MPlaceTy<'tcx, M::Provenance>, u64)> {
-        // Basically we just transmute this place into an array following simd_size_and_type.
-        // (Transmuting is okay since this is an in-memory place. We also double-check the size
-        // stays the same.)
+        // Basically we want to transmute this place into an array following simd_size_and_type.
         let (len, e_ty) = mplace.layout.ty.simd_size_and_type(*self.tcx);
-        let array = Ty::new_array(self.tcx.tcx, e_ty, len);
-        let layout = self.layout_of(array)?;
-        let mplace = mplace.transmute(layout, self)?;
+        // Some SIMD types have padding, so `len` many `e_ty` does not cover the entire place.
+        // Therefore we cannot transmute, and instead we project at offset 0, which side-steps
+        // the size check.
+        let array_layout = self.layout_of(Ty::new_array(self.tcx.tcx, e_ty, len))?;
+        assert!(array_layout.size <= mplace.layout.size);
+        let mplace = mplace.offset(Size::ZERO, array_layout, self)?;
         Ok((mplace, len))
     }
 
@@ -530,7 +525,7 @@ where
 
     /// Computes a place. You should only use this if you intend to write into this
     /// place; for reading, a more efficient alternative is `eval_place_to_op`.
-    #[instrument(skip(self), level = "debug")]
+    #[instrument(skip(self), level = "trace")]
     pub fn eval_place(
         &self,
         mir_place: mir::Place<'tcx>,
@@ -567,7 +562,7 @@ where
 
     /// Write an immediate to a place
     #[inline(always)]
-    #[instrument(skip(self), level = "debug")]
+    #[instrument(skip(self), level = "trace")]
     pub fn write_immediate(
         &mut self,
         src: Immediate<M::Provenance>,
@@ -805,7 +800,7 @@ where
     /// Copies the data from an operand to a place.
     /// `allow_transmute` indicates whether the layouts may disagree.
     #[inline(always)]
-    #[instrument(skip(self), level = "debug")]
+    #[instrument(skip(self), level = "trace")]
     fn copy_op_inner(
         &mut self,
         src: &impl Readable<'tcx, M::Provenance>,
@@ -834,7 +829,7 @@ where
     /// `allow_transmute` indicates whether the layouts may disagree.
     /// Also, if you use this you are responsible for validating that things get copied at the
     /// right type.
-    #[instrument(skip(self), level = "debug")]
+    #[instrument(skip(self), level = "trace")]
     fn copy_op_no_validate(
         &mut self,
         src: &impl Readable<'tcx, M::Provenance>,
@@ -911,7 +906,7 @@ where
     /// If the place currently refers to a local that doesn't yet have a matching allocation,
     /// create such an allocation.
     /// This is essentially `force_to_memplace`.
-    #[instrument(skip(self), level = "debug")]
+    #[instrument(skip(self), level = "trace")]
     pub fn force_allocation(
         &mut self,
         place: &PlaceTy<'tcx, M::Provenance>,
@@ -992,13 +987,25 @@ where
     }
 
     /// Returns a wide MPlace of type `str` to a new 1-aligned allocation.
+    /// Immutable strings are deduplicated and stored in global memory.
     pub fn allocate_str(
         &mut self,
         str: &str,
         kind: MemoryKind<M::MemoryKind>,
         mutbl: Mutability,
     ) -> InterpResult<'tcx, MPlaceTy<'tcx, M::Provenance>> {
-        let ptr = self.allocate_bytes_ptr(str.as_bytes(), Align::ONE, kind, mutbl)?;
+        let tcx = self.tcx.tcx;
+
+        // Use cache for immutable strings.
+        let ptr = if mutbl.is_not() {
+            // Use dedup'd allocation function.
+            let id = tcx.allocate_bytes_dedup(str.as_bytes());
+
+            // Turn untagged "global" pointers (obtained via `tcx`) into the machine pointer to the allocation.
+            M::adjust_alloc_root_pointer(&self, Pointer::from(id), Some(kind))?
+        } else {
+            self.allocate_bytes_ptr(str.as_bytes(), Align::ONE, kind, mutbl)?
+        };
         let meta = Scalar::from_target_usize(u64::try_from(str.len()).unwrap(), self);
         let layout = self.layout_of(self.tcx.types.str_).unwrap();
         Ok(self.ptr_with_meta_to_mplace(ptr.into(), MemPlaceMeta::Meta(meta), layout))
@@ -1010,58 +1017,18 @@ where
     ) -> InterpResult<'tcx, MPlaceTy<'tcx, M::Provenance>> {
         // This must be an allocation in `tcx`
         let _ = self.tcx.global_alloc(raw.alloc_id);
-        let ptr = self.global_base_pointer(Pointer::from(raw.alloc_id))?;
+        let ptr = self.global_root_pointer(Pointer::from(raw.alloc_id))?;
         let layout = self.layout_of(raw.ty)?;
         Ok(self.ptr_to_mplace(ptr.into(), layout))
-    }
-
-    /// Turn a place with a `dyn Trait` type into a place with the actual dynamic type.
-    /// Aso returns the vtable.
-    pub(super) fn unpack_dyn_trait(
-        &self,
-        mplace: &MPlaceTy<'tcx, M::Provenance>,
-    ) -> InterpResult<'tcx, (MPlaceTy<'tcx, M::Provenance>, Pointer<Option<M::Provenance>>)> {
-        assert!(
-            matches!(mplace.layout.ty.kind(), ty::Dynamic(_, _, ty::Dyn)),
-            "`unpack_dyn_trait` only makes sense on `dyn*` types"
-        );
-        let vtable = mplace.meta().unwrap_meta().to_pointer(self)?;
-        let (ty, _) = self.get_ptr_vtable(vtable)?;
-        let layout = self.layout_of(ty)?;
-        // This is a kind of transmute, from a place with unsized type and metadata to
-        // a place with sized type and no metadata.
-        let mplace =
-            MPlaceTy { mplace: MemPlace { meta: MemPlaceMeta::None, ..mplace.mplace }, layout };
-        Ok((mplace, vtable))
-    }
-
-    /// Turn a `dyn* Trait` type into an value with the actual dynamic type.
-    /// Also returns the vtable.
-    pub(super) fn unpack_dyn_star<P: Projectable<'tcx, M::Provenance>>(
-        &self,
-        val: &P,
-    ) -> InterpResult<'tcx, (P, Pointer<Option<M::Provenance>>)> {
-        assert!(
-            matches!(val.layout().ty.kind(), ty::Dynamic(_, _, ty::DynStar)),
-            "`unpack_dyn_star` only makes sense on `dyn*` types"
-        );
-        let data = self.project_field(val, 0)?;
-        let vtable = self.project_field(val, 1)?;
-        let vtable = self.read_pointer(&vtable.to_op(self)?)?;
-        let (ty, _) = self.get_ptr_vtable(vtable)?;
-        let layout = self.layout_of(ty)?;
-        // `data` is already the right thing but has the wrong type. So we transmute it, by
-        // projecting with offset 0.
-        let data = data.transmute(layout, self)?;
-        Ok((data, vtable))
     }
 }
 
 // Some nodes are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 mod size_asserts {
-    use super::*;
     use rustc_data_structures::static_assert_size;
+
+    use super::*;
     // tidy-alphabetical-start
     static_assert_size!(MemPlace, 48);
     static_assert_size!(MemPlaceMeta, 24);

@@ -16,10 +16,12 @@
 //! [`BlockMarker`]: rustc_middle::mir::coverage::CoverageKind::BlockMarker
 //! [`SpanMarker`]: rustc_middle::mir::coverage::CoverageKind::SpanMarker
 
-use crate::MirPass;
 use rustc_middle::mir::coverage::CoverageKind;
-use rustc_middle::mir::{Body, BorrowKind, Rvalue, StatementKind, TerminatorKind};
+use rustc_middle::mir::{Body, BorrowKind, CastKind, Rvalue, StatementKind, TerminatorKind};
+use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::TyCtxt;
+
+use crate::MirPass;
 
 pub struct CleanupPostBorrowck;
 
@@ -29,13 +31,29 @@ impl<'tcx> MirPass<'tcx> for CleanupPostBorrowck {
             for statement in basic_block.statements.iter_mut() {
                 match statement.kind {
                     StatementKind::AscribeUserType(..)
-                    | StatementKind::Assign(box (_, Rvalue::Ref(_, BorrowKind::Fake, _)))
+                    | StatementKind::Assign(box (_, Rvalue::Ref(_, BorrowKind::Fake(_), _)))
                     | StatementKind::Coverage(
                         // These kinds of coverage statements are markers inserted during
                         // MIR building, and are not needed after InstrumentCoverage.
                         CoverageKind::BlockMarker { .. } | CoverageKind::SpanMarker { .. },
                     )
                     | StatementKind::FakeRead(..) => statement.make_nop(),
+                    StatementKind::Assign(box (
+                        _,
+                        Rvalue::Cast(
+                            ref mut cast_kind @ CastKind::PointerCoercion(
+                                PointerCoercion::ArrayToPointer
+                                | PointerCoercion::MutToConstPointer,
+                            ),
+                            ..,
+                        ),
+                    )) => {
+                        // BorrowCk needed to track whether these cases were coercions or casts,
+                        // to know whether to check lifetimes in their pointees,
+                        // but from now on that distinction doesn't matter,
+                        // so just make them ordinary pointer casts instead.
+                        *cast_kind = CastKind::PtrToPtr;
+                    }
                     _ => (),
                 }
             }

@@ -1,7 +1,8 @@
+use rustc_hir as hir;
+use rustc_session::{declare_lint, declare_lint_pass};
+
 use crate::lints::UnitBindingsDiag;
 use crate::{LateLintPass, LintContext};
-use rustc_hir as hir;
-use rustc_middle::ty::Ty;
 
 declare_lint! {
     /// The `unit_bindings` lint detects cases where bindings are useless because they have
@@ -56,8 +57,8 @@ impl<'tcx> LateLintPass<'tcx> for UnitBindings {
             && let Some(init) = local.init
             && let init_ty = tyck_results.expr_ty(init)
             && let local_ty = tyck_results.node_type(local.hir_id)
-            && init_ty == Ty::new_unit(cx.tcx)
-            && local_ty == Ty::new_unit(cx.tcx)
+            && init_ty == cx.tcx.types.unit
+            && local_ty == cx.tcx.types.unit
             && local.ty.is_none()
             && !matches!(init.kind, hir::ExprKind::Tup([]))
             && !matches!(local.pat.kind, hir::PatKind::Tuple([], ..))

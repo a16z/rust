@@ -7,25 +7,6 @@
 //!
 //! The output types are defined in `rustc_session::config::ErrorOutputType`.
 
-use rustc_span::source_map::SourceMap;
-use rustc_span::{FileLines, FileName, SourceFile, Span};
-
-use crate::snippet::{
-    Annotation, AnnotationColumn, AnnotationType, Line, MultilineAnnotation, Style, StyledString,
-};
-use crate::styled_buffer::StyledBuffer;
-use crate::translation::{to_fluent_args, Translate};
-use crate::{
-    diagnostic::DiagLocation, CodeSuggestion, DiagCtxt, DiagInner, DiagMessage, ErrCode,
-    FluentBundle, LazyFallbackBundle, Level, MultiSpan, Subdiag, SubstitutionHighlight,
-    SuggestionStyle, TerminalUrl,
-};
-use derive_setters::Setters;
-use rustc_data_structures::fx::{FxHashMap, FxIndexMap, FxIndexSet};
-use rustc_data_structures::sync::{DynSend, IntoDynSyncSend, Lrc};
-use rustc_error_messages::{FluentArgs, SpanLabel};
-use rustc_lint_defs::pluralize;
-use rustc_span::hygiene::{ExpnKind, MacroKind};
 use std::borrow::Cow;
 use std::cmp::{max, min, Reverse};
 use std::error::Report;
@@ -33,8 +14,28 @@ use std::io::prelude::*;
 use std::io::{self, IsTerminal};
 use std::iter;
 use std::path::Path;
-use termcolor::{Buffer, BufferWriter, ColorChoice, ColorSpec, StandardStream};
-use termcolor::{Color, WriteColor};
+
+use derive_setters::Setters;
+use rustc_data_structures::fx::{FxHashMap, FxIndexMap, FxIndexSet};
+use rustc_data_structures::sync::{DynSend, IntoDynSyncSend, Lrc};
+use rustc_error_messages::{FluentArgs, SpanLabel};
+use rustc_lint_defs::pluralize;
+use rustc_span::hygiene::{ExpnKind, MacroKind};
+use rustc_span::source_map::SourceMap;
+use rustc_span::{char_width, FileLines, FileName, SourceFile, Span};
+use termcolor::{Buffer, BufferWriter, Color, ColorChoice, ColorSpec, StandardStream, WriteColor};
+use tracing::{debug, instrument, trace, warn};
+
+use crate::diagnostic::DiagLocation;
+use crate::snippet::{
+    Annotation, AnnotationColumn, AnnotationType, Line, MultilineAnnotation, Style, StyledString,
+};
+use crate::styled_buffer::StyledBuffer;
+use crate::translation::{to_fluent_args, Translate};
+use crate::{
+    CodeSuggestion, DiagCtxt, DiagInner, DiagMessage, ErrCode, FluentBundle, LazyFallbackBundle,
+    Level, MultiSpan, Subdiag, SubstitutionHighlight, SuggestionStyle, TerminalUrl,
+};
 
 /// Default column width, used in tests and when terminal dimensions cannot be determined.
 const DEFAULT_COLUMN_WIDTH: usize = 140;
@@ -566,7 +567,7 @@ impl Emitter for SilentEmitter {
             if let Some(fatal_note) = &self.fatal_note {
                 diag.sub(Level::Note, fatal_note.clone(), MultiSpan::new());
             }
-            self.fatal_dcx.emit_diagnostic(diag);
+            self.fatal_dcx.handle().emit_diagnostic(diag);
         }
     }
 }
@@ -676,10 +677,7 @@ impl HumanEmitter {
             .skip(left)
             .take_while(|ch| {
                 // Make sure that the trimming on the right will fall within the terminal width.
-                // FIXME: `unicode_width` sometimes disagrees with terminals on how wide a `char`
-                // is. For now, just accept that sometimes the code line will be longer than
-                // desired.
-                let next = unicode_width::UnicodeWidthChar::width(*ch).unwrap_or(1);
+                let next = char_width(*ch);
                 if taken + next > right - left {
                     return false;
                 }
@@ -741,11 +739,7 @@ impl HumanEmitter {
         let left = margin.left(source_string.len());
 
         // Account for unicode characters of width !=0 that were removed.
-        let left = source_string
-            .chars()
-            .take(left)
-            .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1))
-            .sum();
+        let left = source_string.chars().take(left).map(|ch| char_width(ch)).sum();
 
         self.draw_line(
             buffer,
@@ -901,7 +895,7 @@ impl HumanEmitter {
         //      <EMPTY LINE>
         //
         let mut annotations_position = vec![];
-        let mut line_len = 0;
+        let mut line_len: usize = 0;
         let mut p = 0;
         for (i, annotation) in annotations.iter().enumerate() {
             for (j, next) in annotations.iter().enumerate() {
@@ -972,6 +966,31 @@ impl HumanEmitter {
             return vec![];
         }
 
+        if annotations_position
+            .iter()
+            .all(|(_, ann)| matches!(ann.annotation_type, AnnotationType::MultilineStart(_)))
+            && let Some(max_pos) = annotations_position.iter().map(|(pos, _)| *pos).max()
+        {
+            // Special case the following, so that we minimize overlapping multiline spans.
+            //
+            // 3 │       X0 Y0 Z0
+            //   │ ┏━━━━━┛  │  │     < We are writing these lines
+            //   │ ┃┌───────┘  │     < by reverting the "depth" of
+            //   │ ┃│┌─────────┘     < their multilne spans.
+            // 4 │ ┃││   X1 Y1 Z1
+            // 5 │ ┃││   X2 Y2 Z2
+            //   │ ┃│└────╿──│──┘ `Z` label
+            //   │ ┃└─────│──┤
+            //   │ ┗━━━━━━┥  `Y` is a good letter too
+            //   ╰╴       `X` is a good letter
+            for (pos, _) in &mut annotations_position {
+                *pos = max_pos - *pos;
+            }
+            // We know then that we don't need an additional line for the span label, saving us
+            // one line of vertical space.
+            line_len = line_len.saturating_sub(1);
+        }
+
         // Write the column separator.
         //
         // After this we will have:
@@ -984,7 +1003,7 @@ impl HumanEmitter {
         // 4 |   }
         //   |
         for pos in 0..=line_len {
-            draw_col_separator(buffer, line_offset + pos + 1, width_offset - 2);
+            draw_col_separator_no_space(buffer, line_offset + pos + 1, width_offset - 2);
         }
 
         // Write the horizontal lines for multiline annotations
@@ -1513,7 +1532,9 @@ impl HumanEmitter {
                 for line_idx in 0..annotated_file.lines.len() {
                     let file = annotated_file.file.clone();
                     let line = &annotated_file.lines[line_idx];
-                    if let Some(source_string) = file.get_line(line.line_index - 1) {
+                    if let Some(source_string) =
+                        line.line_index.checked_sub(1).and_then(|l| file.get_line(l))
+                    {
                         let leading_whitespace = source_string
                             .chars()
                             .take_while(|c| c.is_whitespace())
@@ -1553,7 +1574,10 @@ impl HumanEmitter {
                 for line in &annotated_file.lines {
                     max_line_len = max(
                         max_line_len,
-                        annotated_file.file.get_line(line.line_index - 1).map_or(0, |s| s.len()),
+                        line.line_index
+                            .checked_sub(1)
+                            .and_then(|l| annotated_file.file.get_line(l))
+                            .map_or(0, |s| s.len()),
                     );
                     for ann in &line.annotations {
                         span_right_margin = max(span_right_margin, ann.start_col.display);
@@ -1899,7 +1923,7 @@ impl HumanEmitter {
                     //
                     // LL | this line was highlighted
                     // LL | this line is just for context
-                    //   ...
+                    // ...
                     // LL | this line is just for context
                     // LL | this line was highlighted
                     _ => {
@@ -1920,7 +1944,7 @@ impl HumanEmitter {
                             )
                         }
 
-                        buffer.puts(row_num, max_line_num_len - 1, "...", Style::LineNumber);
+                        buffer.puts(row_num, 0, "...", Style::LineNumber);
                         row_num += 1;
 
                         if let Some((p, l)) = last_line {
@@ -2008,13 +2032,13 @@ impl HumanEmitter {
                     let sub_len: usize =
                         if is_whitespace_addition { &part.snippet } else { part.snippet.trim() }
                             .chars()
-                            .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1))
+                            .map(|ch| char_width(ch))
                             .sum();
 
                     let offset: isize = offsets
                         .iter()
                         .filter_map(
-                            |(start, v)| if span_start_pos <= *start { None } else { Some(v) },
+                            |(start, v)| if span_start_pos < *start { None } else { Some(v) },
                         )
                         .sum();
                     let underline_start = (span_start_pos + start) as isize + offset;
@@ -2023,7 +2047,7 @@ impl HumanEmitter {
                     let padding: usize = max_line_num_len + 3;
                     for p in underline_start..underline_end {
                         if let DisplaySuggestion::Underline = show_code_change {
-                            // If this is a replacement, underline with `^`, if this is an addition
+                            // If this is a replacement, underline with `~`, if this is an addition
                             // underline with `+`.
                             buffer.putc(
                                 row_num,
@@ -2045,11 +2069,8 @@ impl HumanEmitter {
                     }
 
                     // length of the code after substitution
-                    let full_sub_len = part
-                        .snippet
-                        .chars()
-                        .map(|ch| unicode_width::UnicodeWidthChar::width(ch).unwrap_or(1))
-                        .sum::<usize>() as isize;
+                    let full_sub_len =
+                        part.snippet.chars().map(|ch| char_width(ch)).sum::<usize>() as isize;
 
                     // length of the code to be substituted
                     let snippet_len = span_end_pos as isize - span_start_pos as isize;
@@ -2242,9 +2263,26 @@ impl HumanEmitter {
                     &normalize_whitespace(last_line),
                     Style::NoStyle,
                 );
-                buffer.puts(*row_num, 0, &self.maybe_anonymized(line_num), Style::LineNumber);
-                buffer.puts(*row_num, max_line_num_len + 1, "+ ", Style::Addition);
-                buffer.append(*row_num, &normalize_whitespace(line_to_add), Style::NoStyle);
+                if !line_to_add.trim().is_empty() {
+                    // Check if after the removal, the line is left with only whitespace. If so, we
+                    // will not show an "addition" line, as removing the whole line is what the user
+                    // would really want.
+                    // For example, for the following:
+                    //   |
+                    // 2 -     .await
+                    // 2 +     (note the left over whitepsace)
+                    //   |
+                    // We really want
+                    //   |
+                    // 2 -     .await
+                    //   |
+                    // *row_num -= 1;
+                    buffer.puts(*row_num, 0, &self.maybe_anonymized(line_num), Style::LineNumber);
+                    buffer.puts(*row_num, max_line_num_len + 1, "+ ", Style::Addition);
+                    buffer.append(*row_num, &normalize_whitespace(line_to_add), Style::NoStyle);
+                } else {
+                    *row_num -= 1;
+                }
             } else {
                 *row_num -= 2;
             }
@@ -2255,13 +2293,23 @@ impl HumanEmitter {
                     buffer.puts(*row_num, max_line_num_len + 1, "+ ", Style::Addition);
                 }
                 [] => {
-                    draw_col_separator(buffer, *row_num, max_line_num_len + 1);
+                    draw_col_separator_no_space(buffer, *row_num, max_line_num_len + 1);
                 }
                 _ => {
                     buffer.puts(*row_num, max_line_num_len + 1, "~ ", Style::Addition);
                 }
             }
-            buffer.append(*row_num, &normalize_whitespace(line_to_add), Style::NoStyle);
+            //   LL | line_to_add
+            //   ++^^^
+            //    |  |
+            //    |  magic `3`
+            //    `max_line_num_len`
+            buffer.puts(
+                *row_num,
+                max_line_num_len + 3,
+                &normalize_whitespace(line_to_add),
+                Style::NoStyle,
+            );
         } else if let DisplaySuggestion::Add = show_code_change {
             buffer.puts(*row_num, 0, &self.maybe_anonymized(line_num), Style::LineNumber);
             buffer.puts(*row_num, max_line_num_len + 1, "+ ", Style::Addition);
@@ -2510,18 +2558,53 @@ fn num_decimal_digits(num: usize) -> usize {
 }
 
 // We replace some characters so the CLI output is always consistent and underlines aligned.
+// Keep the following list in sync with `rustc_span::char_width`.
 const OUTPUT_REPLACEMENTS: &[(char, &str)] = &[
-    ('\t', "    "),   // We do our own tab replacement
+    ('\t', "    "),    // We do our own tab replacement
     ('\u{200D}', ""), // Replace ZWJ with nothing for consistent terminal output of grapheme clusters.
-    ('\u{202A}', ""), // The following unicode text flow control characters are inconsistently
-    ('\u{202B}', ""), // supported across CLIs and can cause confusion due to the bytes on disk
-    ('\u{202D}', ""), // not corresponding to the visible source code, so we replace them always.
-    ('\u{202E}', ""),
-    ('\u{2066}', ""),
-    ('\u{2067}', ""),
-    ('\u{2068}', ""),
-    ('\u{202C}', ""),
-    ('\u{2069}', ""),
+    ('\u{202A}', "�"), // The following unicode text flow control characters are inconsistently
+    ('\u{202B}', "�"), // supported across CLIs and can cause confusion due to the bytes on disk
+    ('\u{202D}', "�"), // not corresponding to the visible source code, so we replace them always.
+    ('\u{202E}', "�"),
+    ('\u{2066}', "�"),
+    ('\u{2067}', "�"),
+    ('\u{2068}', "�"),
+    ('\u{202C}', "�"),
+    ('\u{2069}', "�"),
+    // In terminals without Unicode support the following will be garbled, but in *all* terminals
+    // the underlying codepoint will be as well. We could gate this replacement behind a "unicode
+    // support" gate.
+    ('\u{0000}', "␀"),
+    ('\u{0001}', "␁"),
+    ('\u{0002}', "␂"),
+    ('\u{0003}', "␃"),
+    ('\u{0004}', "␄"),
+    ('\u{0005}', "␅"),
+    ('\u{0006}', "␆"),
+    ('\u{0007}', "␇"),
+    ('\u{0008}', "␈"),
+    ('\u{000B}', "␋"),
+    ('\u{000C}', "␌"),
+    ('\u{000D}', "␍"),
+    ('\u{000E}', "␎"),
+    ('\u{000F}', "␏"),
+    ('\u{0010}', "␐"),
+    ('\u{0011}', "␑"),
+    ('\u{0012}', "␒"),
+    ('\u{0013}', "␓"),
+    ('\u{0014}', "␔"),
+    ('\u{0015}', "␕"),
+    ('\u{0016}', "␖"),
+    ('\u{0017}', "␗"),
+    ('\u{0018}', "␘"),
+    ('\u{0019}', "␙"),
+    ('\u{001A}', "␚"),
+    ('\u{001B}', "␛"),
+    ('\u{001C}', "␜"),
+    ('\u{001D}', "␝"),
+    ('\u{001E}', "␞"),
+    ('\u{001F}', "␟"),
+    ('\u{007F}', "␡"),
 ];
 
 fn normalize_whitespace(str: &str) -> String {

@@ -10,9 +10,11 @@ use ide_db::LineIndexDatabase;
 use load_cargo::{load_workspace_at, LoadCargoConfig, ProcMacroServerChoice};
 use rustc_hash::{FxHashMap, FxHashSet};
 use scip::types as scip_types;
+use tracing::error;
 
 use crate::{
     cli::flags,
+    config::ConfigChange,
     line_index::{LineEndings, LineIndex, PositionEncoding},
 };
 
@@ -35,12 +37,20 @@ impl flags::Scip {
             lsp_types::ClientCapabilities::default(),
             vec![],
             None,
+            None,
         );
 
         if let Some(p) = self.config_path {
             let mut file = std::io::BufReader::new(std::fs::File::open(p)?);
             let json = serde_json::from_reader(&mut file)?;
-            config.update(json)?;
+            let mut change = ConfigChange::default();
+            change.change_client_config(json);
+
+            let error_sink;
+            (config, error_sink, _) = config.apply_change(change);
+
+            // FIXME @alibektas : What happens to errors without logging?
+            error!(?error_sink, "Config Error(s)");
         }
         let cargo_config = config.cargo();
         let (db, vfs, _) = load_workspace_at(
@@ -332,7 +342,7 @@ mod test {
         let (file_id, range_or_offset) =
             change_fixture.file_position.expect("expected a marker ()");
         let offset = range_or_offset.expect_offset();
-        (host, FilePosition { file_id, offset })
+        (host, FilePosition { file_id: file_id.into(), offset })
     }
 
     /// If expected == "", then assert that there are no symbols (this is basically local symbol)

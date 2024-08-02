@@ -1,7 +1,9 @@
 //! Implementation of compiling the compiler and standard library, in "check"-based modes.
 
+use std::path::PathBuf;
+
 use crate::core::build_steps::compile::{
-    add_to_sysroot, run_cargo, rustc_cargo, rustc_cargo_env, std_cargo,
+    add_to_sysroot, run_cargo, rustc_cargo, rustc_cargo_env, std_cargo, std_crates_for_run_make,
 };
 use crate::core::build_steps::tool::{prepare_tool_cargo, SourceType};
 use crate::core::builder::{
@@ -9,7 +11,6 @@ use crate::core::builder::{
 };
 use crate::core::config::TargetSelection;
 use crate::{Compiler, Mode, Subcommand};
-use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Std {
@@ -20,102 +21,22 @@ pub struct Std {
     ///
     /// [`compile::Rustc`]: crate::core::build_steps::compile::Rustc
     crates: Vec<String>,
-}
-
-/// Returns args for the subcommand itself (not for cargo)
-fn args(builder: &Builder<'_>) -> Vec<String> {
-    fn strings<'a>(arr: &'a [&str]) -> impl Iterator<Item = String> + 'a {
-        arr.iter().copied().map(String::from)
-    }
-
-    if let Subcommand::Clippy { fix, allow_dirty, allow_staged, allow, deny, warn, forbid } =
-        &builder.config.cmd
-    {
-        // disable the most spammy clippy lints
-        let ignored_lints = [
-            "many_single_char_names", // there are a lot in stdarch
-            "collapsible_if",
-            "type_complexity",
-            "missing_safety_doc", // almost 3K warnings
-            "too_many_arguments",
-            "needless_lifetimes", // people want to keep the lifetimes
-            "wrong_self_convention",
-        ];
-        let mut args = vec![];
-        if *fix {
-            #[rustfmt::skip]
-            args.extend(strings(&[
-                "--fix", "-Zunstable-options",
-                // FIXME: currently, `--fix` gives an error while checking tests for libtest,
-                // possibly because libtest is not yet built in the sysroot.
-                // As a workaround, avoid checking tests and benches when passed --fix.
-                "--lib", "--bins", "--examples",
-            ]));
-
-            if *allow_dirty {
-                args.push("--allow-dirty".to_owned());
-            }
-
-            if *allow_staged {
-                args.push("--allow-staged".to_owned());
-            }
-        }
-
-        args.extend(strings(&["--"]));
-
-        if deny.is_empty() && forbid.is_empty() {
-            args.extend(strings(&["--cap-lints", "warn"]));
-        }
-
-        let all_args = std::env::args().collect::<Vec<_>>();
-        args.extend(get_clippy_rules_in_order(&all_args, allow, deny, warn, forbid));
-
-        args.extend(ignored_lints.iter().map(|lint| format!("-Aclippy::{}", lint)));
-        args.extend(builder.config.free_args.clone());
-        args
-    } else {
-        builder.config.free_args.clone()
-    }
-}
-
-/// We need to keep the order of the given clippy lint rules before passing them.
-/// Since clap doesn't offer any useful interface for this purpose out of the box,
-/// we have to handle it manually.
-pub(crate) fn get_clippy_rules_in_order(
-    all_args: &[String],
-    allow_rules: &[String],
-    deny_rules: &[String],
-    warn_rules: &[String],
-    forbid_rules: &[String],
-) -> Vec<String> {
-    let mut result = vec![];
-
-    for (prefix, item) in
-        [("-A", allow_rules), ("-D", deny_rules), ("-W", warn_rules), ("-F", forbid_rules)]
-    {
-        item.iter().for_each(|v| {
-            let rule = format!("{prefix}{v}");
-            let position = all_args.iter().position(|t| t == &rule).unwrap();
-            result.push((position, rule));
-        });
-    }
-
-    result.sort_by_key(|&(position, _)| position);
-    result.into_iter().map(|v| v.1).collect()
-}
-
-fn cargo_subcommand(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Check => "check",
-        Kind::Clippy => "clippy",
-        Kind::Fix => "fix",
-        _ => unreachable!(),
-    }
+    /// Override `Builder::kind` on cargo invocations.
+    ///
+    /// By default, `Builder::kind` is propagated as the subcommand to the cargo invocations.
+    /// However, there are cases when this is not desirable. For example, when running `x clippy $tool_name`,
+    /// passing `Builder::kind` to cargo invocations would run clippy on the entire compiler and library,
+    /// which is not useful if we only want to lint a few crates with specific rules.
+    override_build_kind: Option<Kind>,
 }
 
 impl Std {
     pub fn new(target: TargetSelection) -> Self {
-        Self { target, crates: vec![] }
+        Self::new_with_build_kind(target, None)
+    }
+
+    pub fn new_with_build_kind(target: TargetSelection, kind: Option<Kind>) -> Self {
+        Self { target, crates: vec![], override_build_kind: kind }
     }
 }
 
@@ -128,12 +49,12 @@ impl Step for Std {
     }
 
     fn make_run(run: RunConfig<'_>) {
-        let crates = run.make_run_crates(Alias::Library);
-        run.builder.ensure(Std { target: run.target, crates });
+        let crates = std_crates_for_run_make(&run);
+        run.builder.ensure(Std { target: run.target, crates, override_build_kind: None });
     }
 
     fn run(self, builder: &Builder<'_>) {
-        builder.update_submodule(&Path::new("library").join("stdarch"));
+        builder.require_submodule("library/stdarch", None);
 
         let target = self.target;
         let compiler = builder.compiler(builder.top_stage, builder.config.build);
@@ -144,7 +65,7 @@ impl Step for Std {
             Mode::Std,
             SourceType::InTree,
             target,
-            cargo_subcommand(builder.kind),
+            self.override_build_kind.unwrap_or(builder.kind),
         );
 
         std_cargo(builder, target, compiler.stage, &mut cargo);
@@ -164,7 +85,7 @@ impl Step for Std {
         run_cargo(
             builder,
             cargo,
-            args(builder),
+            builder.config.free_args.clone(),
             &libstd_stamp(builder, compiler, target),
             vec![],
             true,
@@ -198,7 +119,7 @@ impl Step for Std {
             Mode::Std,
             SourceType::InTree,
             target,
-            cargo_subcommand(builder.kind),
+            self.override_build_kind.unwrap_or(builder.kind),
         );
 
         // If we're not in stage 0, tests and examples will fail to compile
@@ -221,7 +142,7 @@ impl Step for Std {
         run_cargo(
             builder,
             cargo,
-            args(builder),
+            builder.config.free_args.clone(),
             &libstd_test_stamp(builder, compiler, target),
             vec![],
             true,
@@ -239,16 +160,31 @@ pub struct Rustc {
     ///
     /// [`compile::Rustc`]: crate::core::build_steps::compile::Rustc
     crates: Vec<String>,
+    /// Override `Builder::kind` on cargo invocations.
+    ///
+    /// By default, `Builder::kind` is propagated as the subcommand to the cargo invocations.
+    /// However, there are cases when this is not desirable. For example, when running `x clippy $tool_name`,
+    /// passing `Builder::kind` to cargo invocations would run clippy on the entire compiler and library,
+    /// which is not useful if we only want to lint a few crates with specific rules.
+    override_build_kind: Option<Kind>,
 }
 
 impl Rustc {
     pub fn new(target: TargetSelection, builder: &Builder<'_>) -> Self {
+        Self::new_with_build_kind(target, builder, None)
+    }
+
+    pub fn new_with_build_kind(
+        target: TargetSelection,
+        builder: &Builder<'_>,
+        kind: Option<Kind>,
+    ) -> Self {
         let crates = builder
             .in_tree_crates("rustc-main", Some(target))
             .into_iter()
             .map(|krate| krate.name.to_string())
             .collect();
-        Self { target, crates }
+        Self { target, crates, override_build_kind: kind }
     }
 }
 
@@ -263,7 +199,7 @@ impl Step for Rustc {
 
     fn make_run(run: RunConfig<'_>) {
         let crates = run.make_run_crates(Alias::Compiler);
-        run.builder.ensure(Rustc { target: run.target, crates });
+        run.builder.ensure(Rustc { target: run.target, crates, override_build_kind: None });
     }
 
     /// Builds the compiler.
@@ -284,7 +220,7 @@ impl Step for Rustc {
             builder.ensure(crate::core::build_steps::compile::Std::new(compiler, compiler.host));
             builder.ensure(crate::core::build_steps::compile::Std::new(compiler, target));
         } else {
-            builder.ensure(Std::new(target));
+            builder.ensure(Std::new_with_build_kind(target, self.override_build_kind));
         }
 
         let mut cargo = builder::Cargo::new(
@@ -293,10 +229,10 @@ impl Step for Rustc {
             Mode::Rustc,
             SourceType::InTree,
             target,
-            cargo_subcommand(builder.kind),
+            self.override_build_kind.unwrap_or(builder.kind),
         );
 
-        rustc_cargo(builder, &mut cargo, target, compiler.stage);
+        rustc_cargo(builder, &mut cargo, target, &compiler);
 
         // For ./x.py clippy, don't run with --all-targets because
         // linting tests and benchmarks can produce very noisy results
@@ -318,7 +254,7 @@ impl Step for Rustc {
         run_cargo(
             builder,
             cargo,
-            args(builder),
+            builder.config.free_args.clone(),
             &librustc_stamp(builder, compiler, target),
             vec![],
             true,
@@ -371,7 +307,7 @@ impl Step for CodegenBackend {
             Mode::Codegen,
             SourceType::InTree,
             target,
-            cargo_subcommand(builder.kind),
+            builder.kind,
         );
 
         cargo
@@ -384,7 +320,7 @@ impl Step for CodegenBackend {
         run_cargo(
             builder,
             cargo,
-            args(builder),
+            builder.config.free_args.clone(),
             &codegen_backend_stamp(builder, compiler, target, backend),
             vec![],
             true,
@@ -429,7 +365,7 @@ impl Step for RustAnalyzer {
             compiler,
             Mode::ToolRustc,
             target,
-            cargo_subcommand(builder.kind),
+            builder.kind,
             "src/tools/rust-analyzer",
             SourceType::InTree,
             &["in-rust-tree".to_owned()],
@@ -450,7 +386,7 @@ impl Step for RustAnalyzer {
         run_cargo(
             builder,
             cargo,
-            args(builder),
+            builder.config.free_args.clone(),
             &stamp(builder, compiler, target),
             vec![],
             true,
@@ -475,7 +411,7 @@ macro_rules! tool_check_step {
         impl Step for $name {
             type Output = ();
             const ONLY_HOSTS: bool = true;
-            // don't ever check out-of-tree tools by default, they'll fail when toolstate is broken
+            /// don't ever check out-of-tree tools by default, they'll fail when toolstate is broken
             const DEFAULT: bool = matches!($source_type, SourceType::InTree) $( && $default )?;
 
             fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
@@ -497,7 +433,7 @@ macro_rules! tool_check_step {
                     compiler,
                     Mode::ToolRustc,
                     target,
-                    cargo_subcommand(builder.kind),
+                    builder.kind,
                     $path,
                     $source_type,
                     &[],
@@ -513,7 +449,7 @@ macro_rules! tool_check_step {
                 run_cargo(
                     builder,
                     cargo,
-                    args(builder),
+                    builder.config.free_args.clone(),
                     &stamp(builder, compiler, target),
                     vec![],
                     true,
@@ -547,6 +483,7 @@ tool_check_step!(CargoMiri, "src/tools/miri/cargo-miri", SourceType::InTree);
 tool_check_step!(Rls, "src/tools/rls", SourceType::InTree);
 tool_check_step!(Rustfmt, "src/tools/rustfmt", SourceType::InTree);
 tool_check_step!(MiroptTestTools, "src/tools/miropt-test-tools", SourceType::InTree);
+tool_check_step!(TestFloatParse, "src/etc/test-float-parse", SourceType::InTree);
 
 tool_check_step!(Bootstrap, "src/bootstrap", SourceType::InTree, false);
 

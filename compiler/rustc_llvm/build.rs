@@ -23,6 +23,7 @@ const OPTIONAL_COMPONENTS: &[&str] = &[
     "nvptx",
     "hexagon",
     "riscv",
+    "xtensa",
     "bpf",
 ];
 
@@ -50,7 +51,7 @@ fn detect_llvm_link() -> (&'static str, &'static str) {
 fn restore_library_path() {
     let key = tracked_env_var_os("REAL_LIBRARY_PATH_VAR").expect("REAL_LIBRARY_PATH_VAR");
     if let Some(env) = tracked_env_var_os("REAL_LIBRARY_PATH") {
-        env::set_var(&key, &env);
+        env::set_var(&key, env);
     } else {
         env::remove_var(&key);
     }
@@ -196,9 +197,8 @@ fn main() {
         cfg.define("LLVM_RUSTLLVM", None);
     }
 
-    if tracked_env_var_os("LLVM_NDEBUG").is_some() {
+    if tracked_env_var_os("LLVM_ASSERTIONS").is_none() {
         cfg.define("NDEBUG", None);
-        cfg.debug(false);
     }
 
     rerun_if_changed_anything_in_dir(Path::new("llvm-wrapper"));
@@ -234,6 +234,7 @@ fn main() {
         || target.starts_with("mips-")
         || target.starts_with("mipsel-")
         || target.starts_with("powerpc-")
+        || target.starts_with("sparc-")
     {
         // 32-bit targets need to link libatomic.
         println!("cargo:rustc-link-lib=atomic");

@@ -1,16 +1,17 @@
 //! This module add real world mbe example for benchmark tests
 
+use intern::Symbol;
 use rustc_hash::FxHashMap;
-use span::Span;
+use span::{Edition, Span};
 use syntax::{
     ast::{self, HasName},
-    AstNode, SmolStr,
+    AstNode,
 };
 use test_utils::{bench, bench_fixture, skip_slow_tests};
 
 use crate::{
     parser::{MetaVarKind, Op, RepeatKind, Separator},
-    syntax_node_to_token_tree, DeclarativeMacro, DummyTestSpanMap, DUMMY,
+    syntax_node_to_token_tree, DeclarativeMacro, DocCommentDesugarMode, DummyTestSpanMap, DUMMY,
 };
 
 #[test]
@@ -24,9 +25,7 @@ fn benchmark_parse_macro_rules() {
         rules
             .values()
             .map(|it| {
-                DeclarativeMacro::parse_macro_rules(it, |_| span::Edition::CURRENT, true)
-                    .rules
-                    .len()
+                DeclarativeMacro::parse_macro_rules(it, |_| span::Edition::CURRENT).rules.len()
             })
             .sum()
     };
@@ -46,9 +45,9 @@ fn benchmark_expand_macro_rules() {
         invocations
             .into_iter()
             .map(|(id, tt)| {
-                let res = rules[&id].expand(&tt, |_| (), true, DUMMY);
+                let res = rules[&id].expand(&tt, |_| (), DUMMY, Edition::CURRENT);
                 assert!(res.err.is_none());
-                res.value.token_trees.len()
+                res.value.0.token_trees.len()
             })
             .sum()
     };
@@ -58,15 +57,13 @@ fn benchmark_expand_macro_rules() {
 fn macro_rules_fixtures() -> FxHashMap<String, DeclarativeMacro> {
     macro_rules_fixtures_tt()
         .into_iter()
-        .map(|(id, tt)| {
-            (id, DeclarativeMacro::parse_macro_rules(&tt, |_| span::Edition::CURRENT, true))
-        })
+        .map(|(id, tt)| (id, DeclarativeMacro::parse_macro_rules(&tt, |_| span::Edition::CURRENT)))
         .collect()
 }
 
 fn macro_rules_fixtures_tt() -> FxHashMap<String, tt::Subtree<Span>> {
     let fixture = bench_fixture::numerous_macro_rules();
-    let source_file = ast::SourceFile::parse(&fixture).ok().unwrap();
+    let source_file = ast::SourceFile::parse(&fixture, span::Edition::CURRENT).ok().unwrap();
 
     source_file
         .syntax()
@@ -78,6 +75,7 @@ fn macro_rules_fixtures_tt() -> FxHashMap<String, tt::Subtree<Span>> {
                 rule.token_tree().unwrap().syntax(),
                 DummyTestSpanMap,
                 DUMMY,
+                DocCommentDesugarMode::Mbe,
             );
             (id, def_tt)
         })
@@ -120,7 +118,7 @@ fn invocation_fixtures(
                         },
                         token_trees: token_trees.into_boxed_slice(),
                     };
-                    if it.expand(&subtree, |_| (), true, DUMMY).err.is_none() {
+                    if it.expand(&subtree, |_| (), DUMMY, Edition::CURRENT).err.is_none() {
                         res.push((name.clone(), subtree));
                         break;
                     }
@@ -169,7 +167,7 @@ fn invocation_fixtures(
             Op::Literal(it) => token_trees.push(tt::Leaf::from(it.clone()).into()),
             Op::Ident(it) => token_trees.push(tt::Leaf::from(it.clone()).into()),
             Op::Punct(puncts) => {
-                for punct in puncts {
+                for punct in puncts.as_slice() {
                     token_trees.push(tt::Leaf::from(*punct).into());
                 }
             }
@@ -186,7 +184,7 @@ fn invocation_fixtures(
                     }
                     if i + 1 != cnt {
                         if let Some(sep) = separator {
-                            match sep {
+                            match &**sep {
                                 Separator::Literal(it) => {
                                     token_trees.push(tt::Leaf::Literal(it.clone()).into())
                                 }
@@ -214,7 +212,7 @@ fn invocation_fixtures(
 
                 token_trees.push(subtree.into());
             }
-            Op::Ignore { .. } | Op::Index { .. } | Op::Count { .. } | Op::Length { .. } => {}
+            Op::Ignore { .. } | Op::Index { .. } | Op::Count { .. } | Op::Len { .. } => {}
         };
 
         // Simple linear congruential generator for deterministic result
@@ -225,13 +223,24 @@ fn invocation_fixtures(
             *seed
         }
         fn make_ident(ident: &str) -> tt::TokenTree<Span> {
-            tt::Leaf::Ident(tt::Ident { span: DUMMY, text: SmolStr::new(ident) }).into()
+            tt::Leaf::Ident(tt::Ident {
+                span: DUMMY,
+                sym: Symbol::intern(ident),
+                is_raw: tt::IdentIsRaw::No,
+            })
+            .into()
         }
         fn make_punct(char: char) -> tt::TokenTree<Span> {
             tt::Leaf::Punct(tt::Punct { span: DUMMY, char, spacing: tt::Spacing::Alone }).into()
         }
         fn make_literal(lit: &str) -> tt::TokenTree<Span> {
-            tt::Leaf::Literal(tt::Literal { span: DUMMY, text: SmolStr::new(lit) }).into()
+            tt::Leaf::Literal(tt::Literal {
+                span: DUMMY,
+                symbol: Symbol::intern(lit),
+                kind: tt::LitKind::Str,
+                suffix: None,
+            })
+            .into()
         }
         fn make_subtree(
             kind: tt::DelimiterKind,

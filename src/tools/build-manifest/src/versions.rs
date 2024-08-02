@@ -1,9 +1,10 @@
-use anyhow::Error;
-use flate2::read::GzDecoder;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+
+use anyhow::Error;
+use flate2::read::GzDecoder;
 use tar::Archive;
 use xz2::read::XzDecoder;
 
@@ -58,6 +59,7 @@ pkg_type! {
     Miri = "miri"; preview = true,
     JsonDocs = "rust-docs-json"; preview = true,
     RustcCodegenCranelift = "rustc-codegen-cranelift"; preview = true,
+    LlvmBitcodeLinker = "llvm-bitcode-linker"; preview = true,
 }
 
 impl PkgType {
@@ -94,12 +96,14 @@ impl PkgType {
             PkgType::ReproducibleArtifacts => true,
             PkgType::RustMingw => true,
             PkgType::RustAnalysis => true,
+            PkgType::LlvmBitcodeLinker => true,
         }
     }
 
     pub(crate) fn targets(&self) -> &[&str] {
-        use crate::{HOSTS, MINGW, TARGETS};
         use PkgType::*;
+
+        use crate::{HOSTS, MINGW, TARGETS};
 
         match self {
             Rust => HOSTS, // doesn't matter in practice, but return something to avoid panicking
@@ -121,6 +125,7 @@ impl PkgType {
             Rustfmt => HOSTS,
             RustAnalysis => TARGETS,
             LlvmTools => TARGETS,
+            LlvmBitcodeLinker => HOSTS,
         }
     }
 

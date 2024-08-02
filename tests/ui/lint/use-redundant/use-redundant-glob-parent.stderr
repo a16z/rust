@@ -10,8 +10,8 @@ LL |     use bar::Foo;
 note: the lint level is defined here
   --> $DIR/use-redundant-glob-parent.rs:2:9
    |
-LL | #![warn(unused_imports)]
-   |         ^^^^^^^^^^^^^^
+LL | #![warn(redundant_imports)]
+   |         ^^^^^^^^^^^^^^^^^
 
 warning: 1 warning emitted
 

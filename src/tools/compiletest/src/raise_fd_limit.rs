@@ -4,13 +4,12 @@
 /// on the number of cores available.
 ///
 /// This fixes issue #7772.
-#[cfg(any(target_os = "macos", target_os = "ios", target_os = "watchos", target_os = "visionos"))]
+#[cfg(target_vendor = "apple")]
 #[allow(non_camel_case_types)]
 pub unsafe fn raise_fd_limit() {
-    use std::cmp;
-    use std::io;
     use std::mem::size_of_val;
     use std::ptr::null_mut;
+    use std::{cmp, io};
 
     static CTL_KERN: libc::c_int = 1;
     static KERN_MAXFILESPERPROC: libc::c_int = 29;
@@ -50,5 +49,5 @@ pub unsafe fn raise_fd_limit() {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "ios")))]
+#[cfg(not(target_vendor = "apple"))]
 pub unsafe fn raise_fd_limit() {}

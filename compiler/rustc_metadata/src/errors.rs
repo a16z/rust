@@ -1,11 +1,9 @@
-use std::{
-    io::Error,
-    path::{Path, PathBuf},
-};
+use std::io::Error;
+use std::path::{Path, PathBuf};
 
-use rustc_errors::{codes::*, Diag, DiagCtxt, Diagnostic, EmissionGuarantee, Level};
-use rustc_macros::Diagnostic;
-use rustc_session::config;
+use rustc_errors::codes::*;
+use rustc_errors::{Diag, DiagCtxtHandle, Diagnostic, EmissionGuarantee, Level};
+use rustc_macros::{Diagnostic, Subdiagnostic};
 use rustc_span::{sym, Span, Symbol};
 use rustc_target::spec::{PanicStrategy, TargetTriple};
 
@@ -143,8 +141,8 @@ pub struct LinkFrameworkApple {
 }
 
 #[derive(Diagnostic)]
-#[diag(metadata_framework_only_windows, code = E0455)]
-pub struct FrameworkOnlyWindows {
+#[diag(metadata_raw_dylib_only_windows, code = E0455)]
+pub struct RawDylibOnlyWindows {
     #[primary_span]
     pub span: Span,
 }
@@ -504,7 +502,7 @@ pub(crate) struct MultipleCandidates {
 }
 
 impl<G: EmissionGuarantee> Diagnostic<'_, G> for MultipleCandidates {
-    fn into_diag(self, dcx: &'_ DiagCtxt, level: Level) -> Diag<'_, G> {
+    fn into_diag(self, dcx: DiagCtxtHandle<'_>, level: Level) -> Diag<'_, G> {
         let mut diag = Diag::new(dcx, level, fluent::metadata_multiple_candidates);
         diag.arg("crate_name", self.crate_name);
         diag.arg("flavor", self.flavor);
@@ -603,7 +601,7 @@ pub struct InvalidMetadataFiles {
 
 impl<G: EmissionGuarantee> Diagnostic<'_, G> for InvalidMetadataFiles {
     #[track_caller]
-    fn into_diag(self, dcx: &'_ DiagCtxt, level: Level) -> Diag<'_, G> {
+    fn into_diag(self, dcx: DiagCtxtHandle<'_>, level: Level) -> Diag<'_, G> {
         let mut diag = Diag::new(dcx, level, fluent::metadata_invalid_meta_files);
         diag.arg("crate_name", self.crate_name);
         diag.arg("add_info", self.add_info);
@@ -632,7 +630,7 @@ pub struct CannotFindCrate {
 
 impl<G: EmissionGuarantee> Diagnostic<'_, G> for CannotFindCrate {
     #[track_caller]
-    fn into_diag(self, dcx: &'_ DiagCtxt, level: Level) -> Diag<'_, G> {
+    fn into_diag(self, dcx: DiagCtxtHandle<'_>, level: Level) -> Diag<'_, G> {
         let mut diag = Diag::new(dcx, level, fluent::metadata_cannot_find_crate);
         diag.arg("crate_name", self.crate_name);
         diag.arg("current_crate", self.current_crate);
@@ -640,9 +638,7 @@ impl<G: EmissionGuarantee> Diagnostic<'_, G> for CannotFindCrate {
         diag.arg("locator_triple", self.locator_triple.triple());
         diag.code(E0463);
         diag.span(self.span);
-        if (self.crate_name == sym::std || self.crate_name == sym::core)
-            && self.locator_triple != TargetTriple::from_triple(config::host_triple())
-        {
+        if self.crate_name == sym::std || self.crate_name == sym::core {
             if self.missing_core {
                 diag.note(fluent::metadata_target_not_installed);
             } else {

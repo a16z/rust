@@ -1,10 +1,10 @@
 //! The various pretty-printing routines.
 
-use rustc_ast as ast;
+use std::cell::Cell;
+use std::fmt::Write;
+
 use rustc_ast_pretty::pprust as pprust_ast;
 use rustc_errors::FatalError;
-use rustc_hir as hir;
-use rustc_hir_pretty as pprust_hir;
 use rustc_middle::bug;
 use rustc_middle::mir::{write_mir_graphviz, write_mir_pretty};
 use rustc_middle::ty::{self, TyCtxt};
@@ -13,9 +13,8 @@ use rustc_session::Session;
 use rustc_smir::rustc_internal::pretty::write_smir_pretty;
 use rustc_span::symbol::Ident;
 use rustc_span::FileName;
-
-use std::cell::Cell;
-use std::fmt::Write;
+use tracing::debug;
+use {rustc_ast as ast, rustc_hir_pretty as pprust_hir};
 
 pub use self::PpMode::*;
 pub use self::PpSourceMode::*;
@@ -23,20 +22,6 @@ pub use self::PpSourceMode::*;
 struct AstNoAnn;
 
 impl pprust_ast::PpAnn for AstNoAnn {}
-
-struct HirNoAnn<'tcx> {
-    tcx: TyCtxt<'tcx>,
-}
-
-impl<'tcx> pprust_hir::PpAnn for HirNoAnn<'tcx> {
-    fn nested(&self, state: &mut pprust_hir::State<'_>, nested: pprust_hir::Nested) {
-        pprust_hir::PpAnn::nested(
-            &(&self.tcx.hir() as &dyn hir::intravisit::Map<'_>),
-            state,
-            nested,
-        )
-    }
-}
 
 struct AstIdentifiedAnn;
 
@@ -84,11 +69,7 @@ struct HirIdentifiedAnn<'tcx> {
 
 impl<'tcx> pprust_hir::PpAnn for HirIdentifiedAnn<'tcx> {
     fn nested(&self, state: &mut pprust_hir::State<'_>, nested: pprust_hir::Nested) {
-        pprust_hir::PpAnn::nested(
-            &(&self.tcx.hir() as &dyn hir::intravisit::Map<'_>),
-            state,
-            nested,
-        )
+        self.tcx.nested(state, nested)
     }
 
     fn pre(&self, s: &mut pprust_hir::State<'_>, node: pprust_hir::AnnNode<'_>) {
@@ -166,8 +147,7 @@ impl<'tcx> pprust_hir::PpAnn for HirTypedAnn<'tcx> {
         if let pprust_hir::Nested::Body(id) = nested {
             self.maybe_typeck_results.set(Some(self.tcx.typeck_body(id)));
         }
-        let pp_ann = &(&self.tcx.hir() as &dyn hir::intravisit::Map<'_>);
-        pprust_hir::PpAnn::nested(pp_ann, state, nested);
+        self.tcx.nested(state, nested);
         self.maybe_typeck_results.set(old_maybe_typeck_results);
     }
 
@@ -183,7 +163,7 @@ impl<'tcx> pprust_hir::PpAnn for HirTypedAnn<'tcx> {
                 self.tcx
                     .hir()
                     .maybe_body_owned_by(expr.hir_id.owner.def_id)
-                    .map(|body_id| self.tcx.typeck_body(body_id))
+                    .map(|body_id| self.tcx.typeck_body(body_id.id()))
             });
 
             if let Some(typeck_results) = typeck_results {
@@ -300,10 +280,7 @@ pub fn print<'tcx>(sess: &Session, ppm: PpMode, ex: PrintExtra<'tcx>) {
                 )
             };
             match s {
-                PpHirMode::Normal => {
-                    let annotation = HirNoAnn { tcx };
-                    f(&annotation)
-                }
+                PpHirMode::Normal => f(&tcx),
                 PpHirMode::Identified => {
                     let annotation = HirIdentifiedAnn { tcx };
                     f(&annotation)

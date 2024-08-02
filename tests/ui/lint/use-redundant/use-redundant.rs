@@ -1,5 +1,5 @@
 //@ check-pass
-#![warn(unused_imports)]
+#![warn(unused_imports, redundant_imports)]
 
 use crate::foo::Bar;
 

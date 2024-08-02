@@ -2,14 +2,14 @@ use crate::*;
 use rustc_middle::ty::layout::LayoutOf;
 use rustc_target::spec::abi::Abi;
 
-impl<'mir, 'tcx> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn pthread_create(
         &mut self,
-        thread: &OpTy<'tcx, Provenance>,
-        _attr: &OpTy<'tcx, Provenance>,
-        start_routine: &OpTy<'tcx, Provenance>,
-        arg: &OpTy<'tcx, Provenance>,
+        thread: &OpTy<'tcx>,
+        _attr: &OpTy<'tcx>,
+        start_routine: &OpTy<'tcx>,
+        arg: &OpTy<'tcx>,
     ) -> InterpResult<'tcx, i32> {
         let this = self.eval_context_mut();
 
@@ -32,8 +32,8 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
     fn pthread_join(
         &mut self,
-        thread: &OpTy<'tcx, Provenance>,
-        retval: &OpTy<'tcx, Provenance>,
+        thread: &OpTy<'tcx>,
+        retval: &OpTy<'tcx>,
     ) -> InterpResult<'tcx, i32> {
         let this = self.eval_context_mut();
 
@@ -42,16 +42,16 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             throw_unsup_format!("Miri supports pthread_join only with retval==NULL");
         }
 
-        let thread_id = this.read_target_usize(thread)?;
+        let thread_id = this.read_scalar(thread)?.to_int(this.libc_ty_layout("pthread_t").size)?;
         this.join_thread_exclusive(thread_id.try_into().expect("thread ID should fit in u32"))?;
 
         Ok(0)
     }
 
-    fn pthread_detach(&mut self, thread: &OpTy<'tcx, Provenance>) -> InterpResult<'tcx, i32> {
+    fn pthread_detach(&mut self, thread: &OpTy<'tcx>) -> InterpResult<'tcx, i32> {
         let this = self.eval_context_mut();
 
-        let thread_id = this.read_target_usize(thread)?;
+        let thread_id = this.read_scalar(thread)?.to_int(this.libc_ty_layout("pthread_t").size)?;
         this.detach_thread(
             thread_id.try_into().expect("thread ID should fit in u32"),
             /*allow_terminated_joined*/ false,
@@ -60,24 +60,25 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         Ok(0)
     }
 
-    fn pthread_self(&mut self) -> InterpResult<'tcx, Scalar<Provenance>> {
+    fn pthread_self(&mut self) -> InterpResult<'tcx, Scalar> {
         let this = self.eval_context_mut();
 
-        let thread_id = this.get_active_thread();
-        Ok(Scalar::from_target_usize(thread_id.into(), this))
+        let thread_id = this.active_thread();
+        Ok(Scalar::from_uint(thread_id.to_u32(), this.libc_ty_layout("pthread_t").size))
     }
 
     /// Set the name of the current thread. `max_name_len` is the maximal length of the name
     /// including the null terminator.
     fn pthread_setname_np(
         &mut self,
-        thread: Scalar<Provenance>,
-        name: Scalar<Provenance>,
+        thread: Scalar,
+        name: Scalar,
         max_name_len: usize,
-    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+    ) -> InterpResult<'tcx, Scalar> {
         let this = self.eval_context_mut();
 
-        let thread = ThreadId::try_from(thread.to_target_usize(this)?).unwrap();
+        let thread = thread.to_int(this.libc_ty_layout("pthread_t").size)?;
+        let thread = ThreadId::try_from(thread).unwrap();
         let name = name.to_pointer(this)?;
 
         let name = this.read_c_str(name)?.to_owned();
@@ -94,13 +95,14 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
     fn pthread_getname_np(
         &mut self,
-        thread: Scalar<Provenance>,
-        name_out: Scalar<Provenance>,
-        len: Scalar<Provenance>,
-    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+        thread: Scalar,
+        name_out: Scalar,
+        len: Scalar,
+    ) -> InterpResult<'tcx, Scalar> {
         let this = self.eval_context_mut();
 
-        let thread = ThreadId::try_from(thread.to_target_usize(this)?).unwrap();
+        let thread = thread.to_int(this.libc_ty_layout("pthread_t").size)?;
+        let thread = ThreadId::try_from(thread).unwrap();
         let name_out = name_out.to_pointer(this)?;
         let len = len.to_target_usize(this)?;
 

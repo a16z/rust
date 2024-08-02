@@ -1,6 +1,6 @@
-//@ normalize-stderr-test "(the raw bytes of the constant) \(size: [0-9]*, align: [0-9]*\)" -> "$1 (size: $$SIZE, align: $$ALIGN)"
-//@ normalize-stderr-test "( 0x[0-9a-f][0-9a-f] │)? ([0-9a-f][0-9a-f] |__ |╾─*ALLOC[0-9]+(\+[a-z0-9]+)?(<imm>)?─*╼ )+ *│.*" -> " HEX_DUMP"
-//@ normalize-stderr-test "HEX_DUMP\s*\n\s*HEX_DUMP" -> "HEX_DUMP"
+//@ normalize-stderr-test: "(the raw bytes of the constant) \(size: [0-9]*, align: [0-9]*\)" -> "$1 (size: $$SIZE, align: $$ALIGN)"
+//@ normalize-stderr-test: "( 0x[0-9a-f][0-9a-f] │)? ([0-9a-f][0-9a-f] |__ |╾─*ALLOC[0-9]+(\+[a-z0-9]+)?(<imm>)?─*╼ )+ *│.*" -> " HEX_DUMP"
+//@ normalize-stderr-test: "HEX_DUMP\s*\n\s*HEX_DUMP" -> "HEX_DUMP"
 #![feature(const_mut_refs, const_refs_to_static)]
 #![feature(raw_ref_op)]
 
@@ -33,8 +33,8 @@ const fn helper_dangling() -> Option<&'static mut i32> { unsafe {
     // Undefined behaviour (dangling pointer), who doesn't love tests like this.
     Some(&mut *(&mut 42 as *mut i32))
 } }
-const DANGLING: Option<&mut i32> = helper_dangling(); //~ ERROR encountered dangling pointer
-static DANGLING_STATIC: Option<&mut i32> = helper_dangling(); //~ ERROR encountered dangling pointer
+const DANGLING: Option<&mut i32> = helper_dangling(); //~ ERROR it is undefined behavior to use this value
+static DANGLING_STATIC: Option<&mut i32> = helper_dangling(); //~ ERROR it is undefined behavior to use this value
 
 // These are fine! Just statics pointing to mutable statics, nothing fundamentally wrong with this.
 static MUT_STATIC: Option<&mut i32> = helper();

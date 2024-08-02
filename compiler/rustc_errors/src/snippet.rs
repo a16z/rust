@@ -1,5 +1,7 @@
 // Code for annotating snippets.
 
+use rustc_macros::{Decodable, Encodable};
+
 use crate::{Level, Loc};
 
 #[derive(Clone, Debug, PartialOrd, Ord, PartialEq, Eq)]

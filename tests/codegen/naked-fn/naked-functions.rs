@@ -14,19 +14,16 @@ pub unsafe extern "C" fn naked_empty() {
     // CHECK-NEXT: {{.+}}:
     // CHECK-NEXT: call void asm
     // CHECK-NEXT: unreachable
-    asm!("ret",
-         options(noreturn));
+    asm!("ret", options(noreturn));
 }
 
 // CHECK: Function Attrs: naked
-// CHECK-NEXT: define{{.*}}i{{[0-9]+}} @naked_with_args_and_return(i64 %a, i64 %b)
+// CHECK-NEXT: define{{.*}}i{{[0-9]+}} @naked_with_args_and_return(i64 %0, i64 %1)
 #[no_mangle]
 #[naked]
 pub unsafe extern "C" fn naked_with_args_and_return(a: isize, b: isize) -> isize {
     // CHECK-NEXT: {{.+}}:
     // CHECK-NEXT: call void asm
     // CHECK-NEXT: unreachable
-    asm!("lea rax, [rdi + rsi]",
-         "ret",
-         options(noreturn));
+    asm!("lea rax, [rdi + rsi]", "ret", options(noreturn));
 }

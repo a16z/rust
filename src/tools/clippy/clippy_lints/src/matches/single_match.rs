@@ -1,10 +1,10 @@
 use clippy_utils::diagnostics::span_lint_and_sugg;
-use clippy_utils::source::{expr_block, get_source_text, snippet};
+use clippy_utils::source::{expr_block, snippet, SpanRangeExt};
 use clippy_utils::ty::{implements_trait, is_type_diagnostic_item, peel_mid_ty_refs};
 use clippy_utils::{is_lint_allowed, is_unit_expr, is_wild, peel_blocks, peel_hir_pat_refs, peel_n_hir_expr_refs};
 use core::cmp::max;
 use rustc_errors::Applicability;
-use rustc_hir::{Arm, BindingAnnotation, Block, Expr, ExprKind, Pat, PatKind};
+use rustc_hir::{Arm, BindingMode, Block, Expr, ExprKind, Pat, PatKind};
 use rustc_lint::LateContext;
 use rustc_middle::ty::{self, Ty};
 use rustc_span::{sym, Span};
@@ -17,7 +17,7 @@ use super::{MATCH_BOOL, SINGLE_MATCH, SINGLE_MATCH_ELSE};
 /// span, e.g. a string literal `"//"`, but we know that this isn't the case for empty
 /// match arms.
 fn empty_arm_has_comment(cx: &LateContext<'_>, span: Span) -> bool {
-    if let Some(ff) = get_source_text(cx, span)
+    if let Some(ff) = span.get_source_text(cx)
         && let Some(text) = ff.as_str()
     {
         text.as_bytes().windows(2).any(|w| w == b"//" || w == b"/*")
@@ -75,7 +75,7 @@ fn report_single_pattern(
 ) {
     let lint = if els.is_some() { SINGLE_MATCH_ELSE } else { SINGLE_MATCH };
     let ctxt = expr.span.ctxt();
-    let mut app = Applicability::HasPlaceholders;
+    let mut app = Applicability::MachineApplicable;
     let els_str = els.map_or(String::new(), |els| {
         format!(" else {}", expr_block(cx, els, ctxt, "..", Some(expr.span), &mut app))
     });
@@ -166,7 +166,7 @@ fn collect_pat_paths<'a>(acc: &mut Vec<Ty<'a>>, cx: &LateContext<'a>, pat: &Pat<
             let p_ty = cx.typeck_results().pat_ty(p);
             collect_pat_paths(acc, cx, p, p_ty);
         }),
-        PatKind::TupleStruct(..) | PatKind::Binding(BindingAnnotation::NONE, .., None) | PatKind::Path(_) => {
+        PatKind::TupleStruct(..) | PatKind::Binding(BindingMode::NONE, .., None) | PatKind::Path(_) => {
             acc.push(ty);
         },
         _ => {},

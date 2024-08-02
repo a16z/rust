@@ -1,24 +1,23 @@
 //! Tidy check to ensure below in UI test directories:
 //! - the number of entries in each directory must be less than `ENTRY_LIMIT`
 //! - there are no stray `.stderr` files
-use ignore::Walk;
-use lazy_static::lazy_static;
-use regex::Regex;
+
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use ignore::Walk;
+
 // FIXME: GitHub's UI truncates file lists that exceed 1000 entries, so these
 // should all be 1000 or lower. Limits significantly smaller than 1000 are also
 // desirable, because large numbers of files are unwieldy in general. See issue
 // #73494.
-const ENTRY_LIMIT: usize = 900;
+const ENTRY_LIMIT: u32 = 901;
 // FIXME: The following limits should be reduced eventually.
 
-const ISSUES_ENTRY_LIMIT: usize = 1722;
-const ROOT_ENTRY_LIMIT: usize = 859;
+const ISSUES_ENTRY_LIMIT: u32 = 1673;
 
 const EXPECTED_TEST_FILE_EXTENSIONS: &[&str] = &[
     "rs",     // test source files
@@ -43,6 +42,7 @@ const EXTENSION_EXCEPTION_PATHS: &[&str] = &[
     "tests/ui/macros/not-utf8.bin", // testing including data with the include macros
     "tests/ui/macros/syntax-extension-source-utils-files/includeme.fragment", // more include
     "tests/ui/proc-macro/auxiliary/included-file.txt", // more include
+    "tests/ui/unpretty/auxiliary/data.txt", // more include
     "tests/ui/invalid/foo.natvis.xml", // sample debugger visualizer
     "tests/ui/sanitizer/dataflow-abilist.txt", // dataflow sanitizer ABI list file
     "tests/ui/shell-argfiles/shell-argfiles.args", // passing args via a file
@@ -55,7 +55,7 @@ const EXTENSION_EXCEPTION_PATHS: &[&str] = &[
 ];
 
 fn check_entries(tests_path: &Path, bad: &mut bool) {
-    let mut directories: HashMap<PathBuf, usize> = HashMap::new();
+    let mut directories: HashMap<PathBuf, u32> = HashMap::new();
 
     for dir in Walk::new(&tests_path.join("ui")) {
         if let Ok(entry) = dir {
@@ -64,14 +64,10 @@ fn check_entries(tests_path: &Path, bad: &mut bool) {
         }
     }
 
-    let (mut max, mut max_root, mut max_issues) = (0usize, 0usize, 0usize);
+    let (mut max, mut max_issues) = (0, 0);
     for (dir_path, count) in directories {
-        // Use special values for these dirs.
-        let is_root = tests_path.join("ui") == dir_path;
         let is_issues_dir = tests_path.join("ui/issues") == dir_path;
-        let (limit, maxcnt) = if is_root {
-            (ROOT_ENTRY_LIMIT, &mut max_root)
-        } else if is_issues_dir {
+        let (limit, maxcnt) = if is_issues_dir {
             (ISSUES_ENTRY_LIMIT, &mut max_issues)
         } else {
             (ENTRY_LIMIT, &mut max)
@@ -87,12 +83,6 @@ fn check_entries(tests_path: &Path, bad: &mut bool) {
                 dir_path.display()
             );
         }
-    }
-    if ROOT_ENTRY_LIMIT > max_root {
-        tidy_error!(
-            bad,
-            "`ROOT_ENTRY_LIMIT` is too high (is {ROOT_ENTRY_LIMIT}, should be {max_root})"
-        );
     }
     if ISSUES_ENTRY_LIMIT > max_issues {
         tidy_error!(
@@ -182,12 +172,8 @@ pub fn check(root_path: &Path, bless: bool, bad: &mut bool) {
             }
 
             if ext == "rs" {
-                lazy_static! {
-                    static ref ISSUE_NAME_REGEX: Regex =
-                        Regex::new(r"^issues?[-_]?(\d{3,})").unwrap();
-                }
-
-                if let Some(test_name) = ISSUE_NAME_REGEX.captures(testname) {
+                if let Some(test_name) = static_regex!(r"^issues?[-_]?(\d{3,})").captures(testname)
+                {
                     // these paths are always relative to the passed `path` and always UTF8
                     let stripped_path = file_path
                         .strip_prefix(path)

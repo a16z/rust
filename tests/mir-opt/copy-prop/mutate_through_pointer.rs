@@ -1,5 +1,5 @@
 // skip-filecheck
-//@ unit-test: CopyProp
+//@ test-mir-pass: CopyProp
 //
 // This attempts to mutate `a` via a pointer derived from `addr_of!(a)`. That is UB
 // according to Miri. However, the decision to make this UB - and to allow
@@ -18,14 +18,16 @@ use core::intrinsics::mir::*;
 
 #[custom_mir(dialect = "analysis", phase = "post-cleanup")]
 fn f(c: bool) -> bool {
-    mir!({
-        let a = c;
-        let p = core::ptr::addr_of!(a);
-        let p2 = core::ptr::addr_of_mut!(*p);
-        *p2 = false;
-        RET = c;
-        Return()
-    })
+    mir! {
+        {
+            let a = c;
+            let p = core::ptr::addr_of!(a);
+            let p2 = core::ptr::addr_of_mut!(*p);
+            *p2 = false;
+            RET = c;
+            Return()
+        }
+    }
 }
 
 fn main() {

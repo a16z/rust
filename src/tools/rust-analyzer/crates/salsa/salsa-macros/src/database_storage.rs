@@ -1,4 +1,5 @@
-//!
+//! Implementation for `[salsa::database]` decorator.
+
 use heck::ToSnakeCase;
 use proc_macro::TokenStream;
 use syn::parse::{Parse, ParseStream};
@@ -238,13 +239,5 @@ impl Parse for QueryGroup {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let group_path: Path = input.parse()?;
         Ok(QueryGroup { group_path })
-    }
-}
-
-struct Nothing;
-
-impl Parse for Nothing {
-    fn parse(_input: ParseStream<'_>) -> syn::Result<Self> {
-        Ok(Nothing)
     }
 }

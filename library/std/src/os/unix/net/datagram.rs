@@ -1,3 +1,17 @@
+#[cfg(any(
+    target_os = "linux",
+    target_os = "android",
+    target_os = "dragonfly",
+    target_os = "freebsd",
+    target_os = "openbsd",
+    target_os = "netbsd",
+    target_os = "solaris",
+    target_os = "illumos",
+    target_os = "haiku",
+    target_os = "nto",
+))]
+use libc::MSG_NOSIGNAL;
+
 #[cfg(any(doc, target_os = "android", target_os = "linux"))]
 use super::{recv_vectored_with_ancillary_from, send_vectored_with_ancillary_to, SocketAncillary};
 use super::{sockaddr_un, SocketAddr};
@@ -12,18 +26,6 @@ use crate::sys::net::Socket;
 use crate::sys_common::{AsInner, FromInner, IntoInner};
 use crate::time::Duration;
 use crate::{fmt, io};
-
-#[cfg(any(
-    target_os = "linux",
-    target_os = "android",
-    target_os = "dragonfly",
-    target_os = "freebsd",
-    target_os = "openbsd",
-    target_os = "netbsd",
-    target_os = "haiku",
-    target_os = "nto",
-))]
-use libc::MSG_NOSIGNAL;
 #[cfg(not(any(
     target_os = "linux",
     target_os = "android",
@@ -31,10 +33,12 @@ use libc::MSG_NOSIGNAL;
     target_os = "freebsd",
     target_os = "openbsd",
     target_os = "netbsd",
+    target_os = "solaris",
+    target_os = "illumos",
     target_os = "haiku",
     target_os = "nto",
 )))]
-const MSG_NOSIGNAL: libc::c_int = 0x0;
+const MSG_NOSIGNAL: core::ffi::c_int = 0x0;
 
 /// A Unix datagram socket.
 ///
@@ -317,7 +321,7 @@ impl UnixDatagram {
     fn recv_from_flags(
         &self,
         buf: &mut [u8],
-        flags: libc::c_int,
+        flags: core::ffi::c_int,
     ) -> io::Result<(usize, SocketAddr)> {
         let mut count = 0;
         let addr = SocketAddr::new(|addr, len| unsafe {

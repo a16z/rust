@@ -4,27 +4,22 @@
 //!
 //! This API is completely unstable and subject to change.
 
+// tidy-alphabetical-start
+#![allow(internal_features)]
 #![doc(
     html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/",
     test(attr(deny(warnings)))
 )]
 #![doc(rust_logo)]
-#![allow(internal_features)]
-#![feature(rustdoc_internals)]
-#![cfg_attr(bootstrap, feature(associated_type_bounds))]
 #![feature(associated_type_defaults)]
 #![feature(box_patterns)]
 #![feature(if_let_guard)]
 #![feature(let_chains)]
-#![feature(never_type)]
 #![feature(negative_impls)]
+#![feature(never_type)]
+#![feature(rustdoc_internals)]
 #![feature(stmt_expr_attributes)]
-
-#[macro_use]
-extern crate rustc_macros;
-
-#[macro_use]
-extern crate tracing;
+// tidy-alphabetical-end
 
 pub mod util {
     pub mod case;
@@ -48,10 +43,10 @@ pub mod token;
 pub mod tokenstream;
 pub mod visit;
 
-pub use self::ast::*;
-pub use self::ast_traits::{AstDeref, AstNodeWrapper, HasAttrs, HasNodeId, HasSpan, HasTokens};
-
 use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+
+pub use self::ast::*;
+pub use self::ast_traits::{AstDeref, AstNodeWrapper, HasAttrs, HasNodeId, HasTokens};
 
 /// Requirements for a `StableHashingContext` to be used in this crate.
 /// This is a hack to allow using the `HashStable_Generic` derive macro

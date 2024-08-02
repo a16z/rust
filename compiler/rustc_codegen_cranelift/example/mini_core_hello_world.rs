@@ -1,4 +1,14 @@
-#![feature(no_core, lang_items, never_type, linkage, extern_types, thread_local, repr_simd)]
+#![feature(
+    no_core,
+    lang_items,
+    never_type,
+    linkage,
+    extern_types,
+    naked_functions,
+    thread_local,
+    repr_simd,
+    raw_ref_op
+)]
 #![no_core]
 #![allow(dead_code, non_camel_case_types, internal_features)]
 
@@ -112,9 +122,7 @@ fn start<T: Termination + 'static>(
 
 static mut NUM: u8 = 6 * 7;
 
-// FIXME: Use `SyncUnsafeCell` instead of allowing `static_mut_refs` lint
-#[allow(static_mut_refs)]
-static NUM_REF: &'static u8 = unsafe { &NUM };
+static NUM_REF: &'static u8 = unsafe { &*&raw const NUM };
 
 unsafe fn zeroed<T>() -> T {
     let mut uninit = MaybeUninit { uninit: () };
@@ -325,14 +333,10 @@ fn main() {
     #[cfg(all(not(jit), not(all(windows, target_env = "gnu"))))]
     test_tls();
 
-    #[cfg(all(
-        not(jit),
-        not(no_unstable_features),
-        target_arch = "x86_64",
-        any(target_os = "linux", target_os = "macos")
-    ))]
+    #[cfg(all(not(jit), target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
     unsafe {
         global_asm_test();
+        naked_test();
     }
 
     // Both statics have a reference that points to the same anonymous allocation.
@@ -358,17 +362,12 @@ fn stack_val_align() {
     assert_eq!(&a as *const Foo as usize % 8192, 0);
 }
 
-#[cfg(all(
-    not(jit),
-    not(no_unstable_features),
-    target_arch = "x86_64",
-    any(target_os = "linux", target_os = "macos")
-))]
+#[cfg(all(not(jit), target_arch = "x86_64", any(target_os = "linux", target_os = "macos")))]
 extern "C" {
     fn global_asm_test();
 }
 
-#[cfg(all(not(jit), not(no_unstable_features), target_arch = "x86_64", target_os = "linux"))]
+#[cfg(all(not(jit), target_arch = "x86_64", target_os = "linux"))]
 global_asm! {
     "
     .global global_asm_test
@@ -378,7 +377,7 @@ global_asm! {
     "
 }
 
-#[cfg(all(not(jit), not(no_unstable_features), target_arch = "x86_64", target_os = "macos"))]
+#[cfg(all(not(jit), target_arch = "x86_64", target_os = "macos"))]
 global_asm! {
     "
     .global _global_asm_test
@@ -386,6 +385,14 @@ global_asm! {
     // comment that would normally be removed by LLVM
     ret
     "
+}
+
+#[cfg(all(not(jit), target_arch = "x86_64"))]
+#[naked]
+extern "C" fn naked_test() {
+    unsafe {
+        asm!("ret", options(noreturn));
+    }
 }
 
 #[repr(C)]

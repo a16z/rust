@@ -1,15 +1,23 @@
-changelog-seen = 2
-
-[build]
-target = ["riscv32i-jolt-zkvm-elf"]
-extended = true
-tools = ["cargo", "cargo-clippy", "clippy", "rustfmt"]
-configure-args = []
-
-[rust]
-lld = true
-llvm-tools = true
+# Use different pre-set defaults than the global defaults.
+#
+# See `src/bootstrap/defaults` for more information.
+# Note that this has no default value (x.py uses the defaults in `config.example.toml`).
+profile = 'dist'
 
 [llvm]
-download-ci-llvm = false
+
+[build]
+
+# Arguments passed to the `./configure` script, used during distcheck. You
+# probably won't fill this in but rather it's filled in by the `./configure`
+# script. Useful for debugging.
+configure-args = []
+
+[install]
+
+[rust]
+
+[target.aarch64-apple-darwin]
+
+[dist]
 

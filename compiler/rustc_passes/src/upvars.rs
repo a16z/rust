@@ -16,17 +16,17 @@ pub fn provide(providers: &mut Providers) {
         }
 
         let local_def_id = def_id.expect_local();
-        let body = tcx.hir().body(tcx.hir().maybe_body_owned_by(local_def_id)?);
+        let body = tcx.hir().maybe_body_owned_by(local_def_id)?;
 
         let mut local_collector = LocalCollector::default();
-        local_collector.visit_body(body);
+        local_collector.visit_body(&body);
 
         let mut capture_collector = CaptureCollector {
             tcx,
             locals: &local_collector.locals,
             upvars: FxIndexMap::default(),
         };
-        capture_collector.visit_body(body);
+        capture_collector.visit_body(&body);
 
         if !capture_collector.upvars.is_empty() {
             Some(tcx.arena.alloc(capture_collector.upvars))
@@ -66,7 +66,7 @@ impl CaptureCollector<'_, '_> {
 }
 
 impl<'tcx> Visitor<'tcx> for CaptureCollector<'_, 'tcx> {
-    fn visit_path(&mut self, path: &hir::Path<'tcx>, _: hir::HirId) {
+    fn visit_path(&mut self, path: &hir::Path<'tcx>, _: HirId) {
         if let Res::Local(var_id) = path.res {
             self.visit_local_use(var_id, path.span);
         }

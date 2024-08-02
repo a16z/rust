@@ -1,10 +1,14 @@
-use crate::stable_hasher::{HashStable, StableHasher};
-use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
 use std::cmp::Ordering;
 use std::fmt;
 
-#[repr(packed(8))]
+use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
+
+use crate::stable_hasher::{HashStable, StableHasher};
+
+/// A packed 128-bit integer. Useful for reducing the size of structures in
+/// some cases.
 #[derive(Copy, Clone, Debug, Hash, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(packed(8))]
 pub struct Pu128(pub u128);
 
 impl Pu128 {

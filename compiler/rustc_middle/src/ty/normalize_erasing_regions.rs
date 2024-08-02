@@ -7,6 +7,9 @@
 //! `normalize_generic_arg_after_erasing_regions` query for each type
 //! or constant found within. (This underlying query is what is cached.)
 
+use rustc_macros::{HashStable, TyDecodable, TyEncodable};
+use tracing::{debug, instrument};
+
 use crate::traits::query::NoSolution;
 use crate::ty::fold::{FallibleTypeFolder, TypeFoldable, TypeFolder};
 use crate::ty::{self, EarlyBinder, GenericArgsRef, Ty, TyCtxt, TypeVisitableExt};
@@ -99,8 +102,7 @@ impl<'tcx> TyCtxt<'tcx> {
     /// codegen, we need to normalize the contents.
     // FIXME(@lcnr): This method should not be necessary, we now normalize
     // inside of binders. We should be able to only use
-    // `tcx.instantiate_bound_regions_with_erased`. Same for the `try_X`
-    // variant.
+    // `tcx.instantiate_bound_regions_with_erased`.
     #[tracing::instrument(level = "debug", skip(self, param_env))]
     pub fn normalize_erasing_late_bound_regions<T>(
         self,
@@ -114,26 +116,6 @@ impl<'tcx> TyCtxt<'tcx> {
         self.normalize_erasing_regions(param_env, value)
     }
 
-    /// If you have a `Binder<'tcx, T>`, you can do this to strip out the
-    /// late-bound regions and then normalize the result, yielding up
-    /// a `T` (with regions erased). This is appropriate when the
-    /// binder is being instantiated at the call site.
-    ///
-    /// N.B., currently, higher-ranked type bounds inhibit
-    /// normalization. Therefore, each time we erase them in
-    /// codegen, we need to normalize the contents.
-    pub fn try_normalize_erasing_late_bound_regions<T>(
-        self,
-        param_env: ty::ParamEnv<'tcx>,
-        value: ty::Binder<'tcx, T>,
-    ) -> Result<T, NormalizationError<'tcx>>
-    where
-        T: TypeFoldable<TyCtxt<'tcx>>,
-    {
-        let value = self.instantiate_bound_regions_with_erased(value);
-        self.try_normalize_erasing_regions(param_env, value)
-    }
-
     /// Monomorphizes a type from the AST by first applying the
     /// in-scope instantiations and then normalizing any associated
     /// types.
@@ -144,7 +126,7 @@ impl<'tcx> TyCtxt<'tcx> {
         self,
         param_args: GenericArgsRef<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
-        value: EarlyBinder<T>,
+        value: EarlyBinder<'tcx, T>,
     ) -> T
     where
         T: TypeFoldable<TyCtxt<'tcx>>,
@@ -162,7 +144,7 @@ impl<'tcx> TyCtxt<'tcx> {
         self,
         param_args: GenericArgsRef<'tcx>,
         param_env: ty::ParamEnv<'tcx>,
-        value: EarlyBinder<T>,
+        value: EarlyBinder<'tcx, T>,
     ) -> Result<T, NormalizationError<'tcx>>
     where
         T: TypeFoldable<TyCtxt<'tcx>>,
@@ -192,7 +174,7 @@ impl<'tcx> NormalizeAfterErasingRegionsFolder<'tcx> {
 }
 
 impl<'tcx> TypeFolder<TyCtxt<'tcx>> for NormalizeAfterErasingRegionsFolder<'tcx> {
-    fn interner(&self) -> TyCtxt<'tcx> {
+    fn cx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
 
@@ -230,7 +212,7 @@ impl<'tcx> TryNormalizeAfterErasingRegionsFolder<'tcx> {
 impl<'tcx> FallibleTypeFolder<TyCtxt<'tcx>> for TryNormalizeAfterErasingRegionsFolder<'tcx> {
     type Error = NormalizationError<'tcx>;
 
-    fn interner(&self) -> TyCtxt<'tcx> {
+    fn cx(&self) -> TyCtxt<'tcx> {
         self.tcx
     }
 

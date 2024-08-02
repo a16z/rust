@@ -1,9 +1,9 @@
 // ignore-tidy-linelength
 //@ revisions:i686-linux x86_64-linux
 
-//@[i686-linux] compile-flags: --target i686-unknown-linux-gnu
+//@[i686-linux] compile-flags: --target i686-unknown-linux-gnu -C panic=abort
 //@[i686-linux] needs-llvm-components: x86
-//@[x86_64-linux] compile-flags: --target x86_64-unknown-linux-gnu
+//@[x86_64-linux] compile-flags: --target x86_64-unknown-linux-gnu -C panic=abort
 //@[x86_64-linux] needs-llvm-components: x86
 
 // Tests that we correctly copy arguments into allocas when the alignment of the byval argument
@@ -56,7 +56,7 @@ extern "C" {
 #[no_mangle]
 pub unsafe fn rust_to_c_increases_alignment(x: Align1) {
     // i686-linux: start:
-    // i686-linux-NEXT: [[ALLOCA:%[0-9a-z]+]] = alloca %Align1, align 4
+    // i686-linux-NEXT: [[ALLOCA:%[0-9a-z]+]] = alloca [48 x i8], align 4
     // i686-linux-NEXT: call void @llvm.memcpy.{{.+}}(ptr {{.*}}align 4 {{.*}}[[ALLOCA]], ptr {{.*}}align 1 {{.*}}%x
     // i686-linux-NEXT: call void @extern_c_align1({{.+}} [[ALLOCA]])
 
@@ -90,7 +90,7 @@ pub unsafe extern "C" fn c_to_rust_decreases_alignment(x: Align1) {
 #[no_mangle]
 pub unsafe extern "C" fn c_to_rust_increases_alignment(x: Align16) {
     // i686-linux: start:
-    // i686-linux-NEXT: [[ALLOCA:%[0-9a-z]+]] = alloca %Align16, align 16
+    // i686-linux-NEXT: [[ALLOCA:%[0-9a-z]+]] = alloca [48 x i8], align 16
     // i686-linux-NEXT: call void @llvm.memcpy.{{.+}}(ptr {{.*}}align 16 {{.*}}[[ALLOCA]], ptr {{.*}}align 4 {{.*}}%0
     // i686-linux-NEXT: call void @extern_rust_align16({{.+}} [[ALLOCA]])
 
@@ -116,7 +116,7 @@ pub unsafe extern "C" fn c_to_rust_ref_decreases_alignment(x: Align1) {
 #[no_mangle]
 pub unsafe extern "C" fn c_to_rust_ref_increases_alignment(x: Align16) {
     // i686-linux: start:
-    // i686-linux-NEXT: [[ALLOCA:%[0-9a-z]+]] = alloca %Align16, align 16
+    // i686-linux-NEXT: [[ALLOCA:%[0-9a-z]+]] = alloca [48 x i8], align 16
     // i686-linux-NEXT: call void @llvm.memcpy.{{.+}}(ptr {{.*}}align 16 {{.*}}[[ALLOCA]], ptr {{.*}}align 4 {{.*}}%0
     // i686-linux-NEXT: call void @extern_rust_ref_align16({{.+}} [[ALLOCA]])
 

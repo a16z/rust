@@ -1,10 +1,11 @@
 use clippy_config::msrvs::{self, Msrv};
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_hir_and_then;
 use clippy_utils::source::snippet_opt;
 use clippy_utils::visitors::{is_local_used, local_used_once};
 use clippy_utils::{is_trait_method, path_to_local_id};
 use rustc_errors::Applicability;
-use rustc_hir::{BindingAnnotation, ExprKind, LetStmt, Node, PatKind, StmtKind};
+use rustc_hir::{BindingMode, ExprKind, LetStmt, Node, PatKind, StmtKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::impl_lint_pass;
 use rustc_span::sym;
@@ -51,9 +52,10 @@ pub struct ManualHashOne {
 }
 
 impl ManualHashOne {
-    #[must_use]
-    pub fn new(msrv: Msrv) -> Self {
-        Self { msrv }
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            msrv: conf.msrv.clone(),
+        }
     }
 }
 
@@ -62,7 +64,7 @@ impl_lint_pass!(ManualHashOne => [MANUAL_HASH_ONE]);
 impl LateLintPass<'_> for ManualHashOne {
     fn check_local(&mut self, cx: &LateContext<'_>, local: &LetStmt<'_>) {
         // `let mut hasher = seg.build_hasher();`
-        if let PatKind::Binding(BindingAnnotation::MUT, hasher, _, None) = local.pat.kind
+        if let PatKind::Binding(BindingMode::MUT, hasher, _, None) = local.pat.kind
             && let Some(init) = local.init
             && !init.span.from_expansion()
             && let ExprKind::MethodCall(seg, build_hasher, [], _) = init.kind

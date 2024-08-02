@@ -1,7 +1,14 @@
 //! Panic support for core
 //!
-//! The core library cannot define panicking, but it does *declare* panicking. This
-//! means that the functions inside of core are allowed to panic, but to be
+//! In core, panicking is always done with a message, resulting in a `core::panic::PanicInfo`
+//! containing a `fmt::Arguments`. In std, however, panicking can be done with panic_any, which
+//! throws a `Box<dyn Any>` containing any type of value. Because of this,
+//! `std::panic::PanicHookInfo` is a different type, which contains a `&dyn Any` instead of a
+//! `fmt::Arguments`. std's panic handler will convert the `fmt::Arguments` to a `&dyn Any`
+//! containing either a `&'static str` or `String` containing the formatted message.
+//!
+//! The core library cannot define any panic handler, but it can invoke it.
+//! This means that the functions inside of core are allowed to panic, but to be
 //! useful an upstream crate must define panicking for core to use. The current
 //! interface for panicking is:
 //!
@@ -9,11 +16,6 @@
 //! fn panic_impl(pi: &core::panic::PanicInfo<'_>) -> !
 //! # { loop {} }
 //! ```
-//!
-//! This definition allows for panicking with any general message, but it does not
-//! allow for failing with a `Box<Any>` value. (`PanicInfo` just contains a `&(dyn Any + Send)`,
-//! for which we fill in a dummy value in `PanicInfo::internal_constructor`.)
-//! The reason for this is that core is not allowed to allocate.
 //!
 //! This module contains a few other panicking functions, but these are just the
 //! necessary lang items for the compiler. All panics are funneled through this
@@ -61,8 +63,8 @@ pub const fn panic_fmt(fmt: fmt::Arguments<'_>) -> ! {
         fn panic_impl(pi: &PanicInfo<'_>) -> !;
     }
 
-    let pi = PanicInfo::internal_constructor(
-        Some(&fmt),
+    let pi = PanicInfo::new(
+        fmt,
         Location::caller(),
         /* can_unwind */ true,
         /* force_no_backtrace */ false,
@@ -99,8 +101,8 @@ pub const fn panic_nounwind_fmt(fmt: fmt::Arguments<'_>, force_no_backtrace: boo
         }
 
         // PanicInfo with the `can_unwind` flag set to false forces an abort.
-        let pi = PanicInfo::internal_constructor(
-            Some(&fmt),
+        let pi = PanicInfo::new(
+            fmt,
             Location::caller(),
             /* can_unwind */ false,
             force_no_backtrace,
@@ -124,8 +126,8 @@ pub const fn panic_nounwind_fmt(fmt: fmt::Arguments<'_>, force_no_backtrace: boo
 // above.
 
 /// The underlying implementation of core's `panic!` macro when no formatting is used.
-// never inline unless panic_immediate_abort to avoid code
-// bloat at the call sites as much as possible
+// Never inline unless panic_immediate_abort to avoid code
+// bloat at the call sites as much as possible.
 #[cfg_attr(not(feature = "panic_immediate_abort"), inline(never), cold)]
 #[cfg_attr(feature = "panic_immediate_abort", inline)]
 #[track_caller]
@@ -138,6 +140,11 @@ pub const fn panic(expr: &'static str) -> ! {
     // truncation and padding (even though none is used here). Using
     // Arguments::new_const may allow the compiler to omit Formatter::pad from the
     // output binary, saving up to a few kilobytes.
+    // However, this optimization only works for `'static` strings: `new_const` also makes this
+    // message return `Some` from `Arguments::as_str`, which means it can become part of the panic
+    // payload without any allocation or copying. Shorter-lived strings would become invalid as
+    // stack frames get popped during unwinding, and couldn't be directly referenced from the
+    // payload.
     panic_fmt(fmt::Arguments::new_const(&[expr]));
 }
 
@@ -151,7 +158,6 @@ pub const fn panic(expr: &'static str) -> ! {
 // reducing binary size impact.
 macro_rules! panic_const {
     ($($lang:ident = $message:expr,)+) => {
-        #[cfg(not(bootstrap))]
         pub mod panic_const {
             use super::*;
 
@@ -223,14 +229,6 @@ pub fn panic_nounwind_nobacktrace(expr: &'static str) -> ! {
     panic_nounwind_fmt(fmt::Arguments::new_const(&[expr]), /* force_no_backtrace */ true);
 }
 
-#[inline]
-#[track_caller]
-#[rustc_diagnostic_item = "panic_str"]
-#[rustc_const_unstable(feature = "panic_internals", issue = "none")]
-pub const fn panic_str(expr: &str) -> ! {
-    panic_display(&expr);
-}
-
 #[track_caller]
 #[cfg_attr(not(feature = "panic_immediate_abort"), inline(never), cold)]
 #[cfg_attr(feature = "panic_immediate_abort", inline)]
@@ -244,6 +242,16 @@ pub const fn panic_explicit() -> ! {
 #[rustc_diagnostic_item = "unreachable_display"] // needed for `non-fmt-panics` lint
 pub fn unreachable_display<T: fmt::Display>(x: &T) -> ! {
     panic_fmt(format_args!("internal error: entered unreachable code: {}", *x));
+}
+
+/// This exists solely for the 2015 edition `panic!` macro to trigger
+/// a lint on `panic!(my_str_variable);`.
+#[inline]
+#[track_caller]
+#[rustc_diagnostic_item = "panic_str_2015"]
+#[rustc_const_unstable(feature = "panic_internals", issue = "none")]
+pub const fn panic_str_2015(expr: &str) -> ! {
+    panic_display(&expr);
 }
 
 #[inline]
@@ -286,10 +294,11 @@ fn panic_misaligned_pointer_dereference(required: usize, found: usize) -> ! {
     )
 }
 
-/// Panic because we cannot unwind out of a function.
+/// Panics because we cannot unwind out of a function.
 ///
 /// This is a separate function to avoid the codesize impact of each crate containing the string to
 /// pass to `panic_nounwind`.
+///
 /// This function is called directly by the codegen backend, and must not have
 /// any extra arguments (including those synthesized by track_caller).
 #[cfg_attr(not(feature = "panic_immediate_abort"), inline(never), cold)]
@@ -301,10 +310,11 @@ fn panic_cannot_unwind() -> ! {
     panic_nounwind("panic in a function that cannot unwind")
 }
 
-/// Panic because we are unwinding out of a destructor during cleanup.
+/// Panics because we are unwinding out of a destructor during cleanup.
 ///
 /// This is a separate function to avoid the codesize impact of each crate containing the string to
 /// pass to `panic_nounwind`.
+///
 /// This function is called directly by the codegen backend, and must not have
 /// any extra arguments (including those synthesized by track_caller).
 #[cfg_attr(not(feature = "panic_immediate_abort"), inline(never), cold)]

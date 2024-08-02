@@ -82,6 +82,20 @@
 //!
 //! The corresponding [`Sync`] version of `OnceCell<T>` is [`OnceLock<T>`].
 //!
+//! ## `LazyCell<T, F>`
+//!
+//! A common pattern with OnceCell is, for a given OnceCell, to use the same function on every
+//! call to [`OnceCell::get_or_init`] with that cell. This is what is offered by [`LazyCell`],
+//! which pairs cells of `T` with functions of `F`, and always calls `F` before it yields `&T`.
+//! This happens implicitly by simply attempting to dereference the LazyCell to get its contents,
+//! so its use is much more transparent with a place which has been initialized by a constant.
+//!
+//! More complicated patterns that don't fit this description can be built on `OnceCell<T>` instead.
+//!
+//! `LazyCell` works by providing an implementation of `impl Deref` that calls the function,
+//! so you can just use it by dereference (e.g. `*lazy_cell` or `lazy_cell.deref()`).
+//!
+//! The corresponding [`Sync`] version of `LazyCell<T, F>` is [`LazyLock<T, F>`].
 //!
 //! # When to choose interior mutability
 //!
@@ -230,6 +244,7 @@
 //! [`RwLock<T>`]: ../../std/sync/struct.RwLock.html
 //! [`Mutex<T>`]: ../../std/sync/struct.Mutex.html
 //! [`OnceLock<T>`]: ../../std/sync/struct.OnceLock.html
+//! [`LazyLock<T, F>`]: ../../std/sync/struct.LazyLock.html
 //! [`Sync`]: ../../std/marker/trait.Sync.html
 //! [`atomic`]: crate::sync::atomic
 
@@ -238,14 +253,14 @@
 use crate::cmp::Ordering;
 use crate::fmt::{self, Debug, Display};
 use crate::marker::{PhantomData, Unsize};
-use crate::mem::{self, size_of};
-use crate::ops::{CoerceUnsized, Deref, DerefMut, DispatchFromDyn};
+use crate::mem;
+use crate::ops::{CoerceUnsized, Deref, DerefMut, DerefPure, DispatchFromDyn};
 use crate::ptr::{self, NonNull};
 
 mod lazy;
 mod once;
 
-#[unstable(feature = "lazy_cell", issue = "109736")]
+#[stable(feature = "lazy_cell", since = "1.80.0")]
 pub use lazy::LazyCell;
 #[stable(feature = "once_cell", since = "1.70.0")]
 pub use once::OnceCell;
@@ -412,7 +427,9 @@ impl<T> Cell<T> {
     }
 
     /// Swaps the values of two `Cell`s.
-    /// Difference with `std::mem::swap` is that this function doesn't require `&mut` reference.
+    ///
+    /// The difference with `std::mem::swap` is that this function doesn't
+    /// require a `&mut` reference.
     ///
     /// # Panics
     ///
@@ -1277,11 +1294,11 @@ impl<T: Clone> Clone for RefCell<T> {
 
     /// # Panics
     ///
-    /// Panics if `other` is currently mutably borrowed.
+    /// Panics if `source` is currently mutably borrowed.
     #[inline]
     #[track_caller]
-    fn clone_from(&mut self, other: &Self) {
-        self.get_mut().clone_from(&other.borrow())
+    fn clone_from(&mut self, source: &Self) {
+        self.get_mut().clone_from(&source.borrow())
     }
 }
 
@@ -1452,6 +1469,9 @@ impl<T: ?Sized> Deref for Ref<'_, T> {
     }
 }
 
+#[unstable(feature = "deref_pure_trait", issue = "87121")]
+unsafe impl<T: ?Sized> DerefPure for Ref<'_, T> {}
+
 impl<'b, T: ?Sized> Ref<'b, T> {
     /// Copies a `Ref`.
     ///
@@ -1561,7 +1581,7 @@ impl<'b, T: ?Sized> Ref<'b, T> {
         )
     }
 
-    /// Convert into a reference to the underlying data.
+    /// Converts into a reference to the underlying data.
     ///
     /// The underlying `RefCell` can never be mutably borrowed from again and will always appear
     /// already immutably borrowed. It is not a good idea to leak more than a constant number of
@@ -1729,7 +1749,7 @@ impl<'b, T: ?Sized> RefMut<'b, T> {
         )
     }
 
-    /// Convert into a mutable reference to the underlying data.
+    /// Converts into a mutable reference to the underlying data.
     ///
     /// The underlying `RefCell` can not be borrowed from again and will always appear already
     /// mutably borrowed, making the returned reference the only to the interior.
@@ -1844,6 +1864,9 @@ impl<T: ?Sized> DerefMut for RefMut<'_, T> {
     }
 }
 
+#[unstable(feature = "deref_pure_trait", issue = "87121")]
+unsafe impl<T: ?Sized> DerefPure for RefMut<'_, T> {}
+
 #[unstable(feature = "coerce_unsized", issue = "18598")]
 impl<'b, T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<RefMut<'b, U>> for RefMut<'b, T> {}
 
@@ -1858,7 +1881,7 @@ impl<T: ?Sized + fmt::Display> fmt::Display for RefMut<'_, T> {
 ///
 /// If you have a reference `&T`, then normally in Rust the compiler performs optimizations based on
 /// the knowledge that `&T` points to immutable data. Mutating that data, for example through an
-/// alias or by transmuting an `&T` into an `&mut T`, is considered undefined behavior.
+/// alias or by transmuting a `&T` into a `&mut T`, is considered undefined behavior.
 /// `UnsafeCell<T>` opts-out of the immutability guarantee for `&T`: a shared reference
 /// `&UnsafeCell<T>` may point to data that is being mutated. This is called "interior mutability".
 ///
@@ -1915,7 +1938,7 @@ impl<T: ?Sized + fmt::Display> fmt::Display for RefMut<'_, T> {
 /// to have multiple `&mut UnsafeCell<T>` aliases. That is, `UnsafeCell` is a wrapper
 /// designed to have a special interaction with _shared_ accesses (_i.e._, through an
 /// `&UnsafeCell<_>` reference); there is no magic whatsoever when dealing with _exclusive_
-/// accesses (_e.g._, through an `&mut UnsafeCell<_>`): neither the cell nor the wrapped value
+/// accesses (_e.g._, through a `&mut UnsafeCell<_>`): neither the cell nor the wrapped value
 /// may be aliased for the duration of that `&mut` borrow.
 /// This is showcased by the [`.get_mut()`] accessor, which is a _safe_ getter that yields
 /// a `&mut T`.

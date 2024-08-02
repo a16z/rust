@@ -4,10 +4,9 @@
 //@ compile-flags: -O --edition=2021 -Zmerge-functions=disabled
 //@ only-64bit (because the LLVM type of i64 for usize shows up)
 #![crate_type = "lib"]
-#![feature(generic_nonzero)]
 
-use core::ptr::NonNull;
 use core::num::NonZero;
+use core::ptr::NonNull;
 
 // CHECK-LABEL: @check_non_null
 #[no_mangle]
@@ -74,7 +73,7 @@ pub fn isize_try_from_i32(x: NonZero<i32>) -> NonZero<isize> {
 
 // CHECK-LABEL: @u64_from_nonzero_is_not_zero
 #[no_mangle]
-pub fn u64_from_nonzero_is_not_zero(x: NonZero<u64>)->bool {
+pub fn u64_from_nonzero_is_not_zero(x: NonZero<u64>) -> bool {
     // CHECK-NOT: br
     // CHECK: ret i1 false
     // CHECK-NOT: br

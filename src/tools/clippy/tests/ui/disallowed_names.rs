@@ -60,6 +60,7 @@ fn issue_1647_ref_mut() {
     //~^ ERROR: use of a disallowed/placeholder name `quux`
 }
 
+#[cfg(test)]
 mod tests {
     fn issue_7305() {
         // `disallowed_names` lint should not be triggered inside of the test code.
@@ -70,4 +71,9 @@ mod tests {
             let foo = 0;
         }
     }
+}
+
+#[test]
+fn test_with_disallowed_name() {
+    let foo = 0;
 }

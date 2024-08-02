@@ -1,5 +1,5 @@
 //@ check-pass
-#![warn(unused_imports)]
+#![warn(redundant_imports)]
 
 
 use std::option::Option::Some;//~ WARNING the item `Some` is imported redundantly

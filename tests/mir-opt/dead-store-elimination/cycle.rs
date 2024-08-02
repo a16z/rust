@@ -2,7 +2,7 @@
 // report that *all* of these stores are live.
 //
 //@ needs-unwind
-//@ unit-test: DeadStoreElimination-initial
+//@ test-mir-pass: DeadStoreElimination-initial
 
 #![feature(core_intrinsics, custom_mir)]
 use std::intrinsics::mir::*;
@@ -20,7 +20,7 @@ fn cycle(mut x: i32, mut y: i32, mut z: i32) {
     // CHECK-NOT: {{_.*}} = move {{_.*}};
 
     // We use custom MIR to avoid generating debuginfo, that would force to preserve writes.
-    mir!(
+    mir! {
         let condition: bool;
         {
             Call(condition = cond(), ReturnTo(bb1), UnwindContinue())
@@ -38,7 +38,7 @@ fn cycle(mut x: i32, mut y: i32, mut z: i32) {
         ret = {
             Return()
         }
-    )
+    }
 }
 
 fn main() {

@@ -165,7 +165,8 @@ fn test_join_for_different_lengths_with_long_separator() {
 
 #[test]
 fn test_join_issue_80335() {
-    use core::{borrow::Borrow, cell::Cell};
+    use core::borrow::Borrow;
+    use core::cell::Cell;
 
     struct WeirdBorrow {
         state: Cell<bool>,
@@ -1848,6 +1849,9 @@ fn to_lowercase() {
     assert_eq!("ΑΣ'Α".to_lowercase(), "ασ'α");
     assert_eq!("ΑΣ''Α".to_lowercase(), "ασ''α");
 
+    // https://github.com/rust-lang/rust/issues/124714
+    assert_eq!("abcdefghijklmnopΣ".to_lowercase(), "abcdefghijklmnopς");
+
     // a really long string that has it's lowercase form
     // even longer. this tests that implementations don't assume
     // an incorrect upper bound on allocations
@@ -1924,12 +1928,10 @@ mod pattern {
         }
     }
 
-    fn cmp_search_to_vec<'a>(
-        rev: bool,
-        pat: impl Pattern<'a, Searcher: ReverseSearcher<'a>>,
-        haystack: &'a str,
-        right: Vec<SearchStep>,
-    ) {
+    fn cmp_search_to_vec<P>(rev: bool, pat: P, haystack: &str, right: Vec<SearchStep>)
+    where
+        P: for<'a> Pattern<Searcher<'a>: ReverseSearcher<'a>>,
+    {
         let mut searcher = pat.into_searcher(haystack);
         let mut v = vec![];
         loop {
@@ -2188,9 +2190,9 @@ generate_iterator_test! {
 fn different_str_pattern_forwarding_lifetimes() {
     use std::str::pattern::Pattern;
 
-    fn foo<'a, P>(p: P)
+    fn foo<P>(p: P)
     where
-        for<'b> &'b P: Pattern<'a>,
+        for<'b> &'b P: Pattern,
     {
         for _ in 0..3 {
             "asdf".find(&p);

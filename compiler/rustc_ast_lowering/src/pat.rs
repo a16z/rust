@@ -1,17 +1,17 @@
-use super::errors::{
-    ArbitraryExpressionInPattern, ExtraDoubleDot, MisplacedDoubleDot, SubTupleBinding,
-};
-use super::ResolverAstLoweringExt;
-use super::{ImplTraitContext, LoweringContext, ParamMode};
-use crate::ImplTraitPosition;
-
 use rustc_ast::ptr::P;
 use rustc_ast::*;
 use rustc_data_structures::stack::ensure_sufficient_stack;
 use rustc_hir as hir;
 use rustc_hir::def::Res;
+use rustc_span::source_map::Spanned;
 use rustc_span::symbol::Ident;
-use rustc_span::{source_map::Spanned, Span};
+use rustc_span::Span;
+
+use super::errors::{
+    ArbitraryExpressionInPattern, ExtraDoubleDot, MisplacedDoubleDot, SubTupleBinding,
+};
+use super::{ImplTraitContext, LoweringContext, ParamMode, ResolverAstLoweringExt};
+use crate::ImplTraitPosition;
 
 impl<'a, 'hir> LoweringContext<'a, 'hir> {
     pub(crate) fn lower_pat(&mut self, pattern: &Pat) -> &'hir hir::Pat<'hir> {
@@ -243,7 +243,7 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
     fn lower_pat_ident(
         &mut self,
         p: &Pat,
-        annotation: BindingAnnotation,
+        annotation: BindingMode,
         ident: Ident,
         lower_sub: impl FnOnce(&mut Self) -> Option<&'hir hir::Pat<'hir>>,
     ) -> hir::PatKind<'hir> {
@@ -339,7 +339,11 @@ impl<'a, 'hir> LoweringContext<'a, 'hir> {
             ExprKind::Path(..) if allow_paths => {}
             ExprKind::Unary(UnOp::Neg, inner) if matches!(inner.kind, ExprKind::Lit(_)) => {}
             _ => {
-                let guar = self.dcx().emit_err(ArbitraryExpressionInPattern { span: expr.span });
+                let pattern_from_macro = expr.is_approximately_pattern();
+                let guar = self.dcx().emit_err(ArbitraryExpressionInPattern {
+                    span: expr.span,
+                    pattern_from_macro_note: pattern_from_macro,
+                });
                 return self.arena.alloc(self.expr_err(expr.span, guar));
             }
         }

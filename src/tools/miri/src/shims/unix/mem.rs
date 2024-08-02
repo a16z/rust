@@ -11,23 +11,23 @@
 //! calls to munmap, but for a very different reason. In principle, according to the man pages, it
 //! is possible to unmap arbitrary regions of address space. But in a high-level language like Rust
 //! this amounts to partial deallocation, which LLVM does not support. So any attempt to call our
-//! munmap shim which would partily unmap a region of address space previously mapped by mmap will
+//! munmap shim which would partially unmap a region of address space previously mapped by mmap will
 //! report UB.
 
 use crate::*;
 use rustc_target::abi::Size;
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     fn mmap(
         &mut self,
-        addr: &OpTy<'tcx, Provenance>,
-        length: &OpTy<'tcx, Provenance>,
-        prot: &OpTy<'tcx, Provenance>,
-        flags: &OpTy<'tcx, Provenance>,
-        fd: &OpTy<'tcx, Provenance>,
+        addr: &OpTy<'tcx>,
+        length: &OpTy<'tcx>,
+        prot: &OpTy<'tcx>,
+        flags: &OpTy<'tcx>,
+        fd: &OpTy<'tcx>,
         offset: i128,
-    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+    ) -> InterpResult<'tcx, Scalar> {
         let this = self.eval_context_mut();
 
         // We do not support MAP_FIXED, so the addr argument is always ignored (except for the MacOS hack)
@@ -42,9 +42,12 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         let map_shared = this.eval_libc_i32("MAP_SHARED");
         let map_fixed = this.eval_libc_i32("MAP_FIXED");
 
-        // This is a horrible hack, but on MacOS the guard page mechanism uses mmap
+        // This is a horrible hack, but on MacOS and Solaris the guard page mechanism uses mmap
         // in a way we do not support. We just give it the return value it expects.
-        if this.frame_in_std() && this.tcx.sess.target.os == "macos" && (flags & map_fixed) != 0 {
+        if this.frame_in_std()
+            && matches!(&*this.tcx.sess.target.os, "macos" | "solaris")
+            && (flags & map_fixed) != 0
+        {
             return Ok(Scalar::from_maybe_pointer(Pointer::from_addr_invalid(addr), this));
         }
 
@@ -53,11 +56,11 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         // First, we do some basic argument validation as required by mmap
         if (flags & (map_private | map_shared)).count_ones() != 1 {
-            this.set_last_error(Scalar::from_i32(this.eval_libc_i32("EINVAL")))?;
+            this.set_last_error(this.eval_libc("EINVAL"))?;
             return Ok(this.eval_libc("MAP_FAILED"));
         }
         if length == 0 {
-            this.set_last_error(Scalar::from_i32(this.eval_libc_i32("EINVAL")))?;
+            this.set_last_error(this.eval_libc("EINVAL"))?;
             return Ok(this.eval_libc("MAP_FAILED"));
         }
 
@@ -68,24 +71,27 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             throw_unsup_format!("Miri does not support file-backed memory mappings");
         }
 
-        // POSIX says:
-        // [ENOTSUP]
-        // * MAP_FIXED or MAP_PRIVATE was specified in the flags argument and the implementation
-        // does not support this functionality.
-        // * The implementation does not support the combination of accesses requested in the
-        // prot argument.
-        //
-        // Miri doesn't support MAP_FIXED or any any protections other than PROT_READ|PROT_WRITE.
-        if flags & map_fixed != 0 || prot != prot_read | prot_write {
-            this.set_last_error(Scalar::from_i32(this.eval_libc_i32("ENOTSUP")))?;
-            return Ok(this.eval_libc("MAP_FAILED"));
+        // Miri doesn't support MAP_FIXED.
+        if flags & map_fixed != 0 {
+            throw_unsup_format!(
+                "Miri does not support calls to mmap with MAP_FIXED as part of the flags argument",
+            );
+        }
+
+        // Miri doesn't support protections other than PROT_READ|PROT_WRITE.
+        if prot != prot_read | prot_write {
+            throw_unsup_format!(
+                "Miri does not support calls to mmap with protections other than \
+                 PROT_READ|PROT_WRITE",
+            );
         }
 
         // Miri does not support shared mappings, or any of the other extensions that for example
         // Linux has added to the flags arguments.
         if flags != map_private | map_anonymous {
             throw_unsup_format!(
-                "Miri only supports calls to mmap which set the flags argument to MAP_PRIVATE|MAP_ANONYMOUS"
+                "Miri only supports calls to mmap which set the flags argument to \
+                 MAP_PRIVATE|MAP_ANONYMOUS",
             );
         }
 
@@ -96,11 +102,11 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
 
         let align = this.machine.page_align();
         let Some(map_length) = length.checked_next_multiple_of(this.machine.page_size) else {
-            this.set_last_error(Scalar::from_i32(this.eval_libc_i32("EINVAL")))?;
+            this.set_last_error(this.eval_libc("EINVAL"))?;
             return Ok(this.eval_libc("MAP_FAILED"));
         };
         if map_length > this.target_usize_max() {
-            this.set_last_error(Scalar::from_i32(this.eval_libc_i32("EINVAL")))?;
+            this.set_last_error(this.eval_libc("EINVAL"))?;
             return Ok(this.eval_libc("MAP_FAILED"));
         }
 
@@ -117,11 +123,7 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         Ok(Scalar::from_pointer(ptr, this))
     }
 
-    fn munmap(
-        &mut self,
-        addr: &OpTy<'tcx, Provenance>,
-        length: &OpTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+    fn munmap(&mut self, addr: &OpTy<'tcx>, length: &OpTy<'tcx>) -> InterpResult<'tcx, Scalar> {
         let this = self.eval_context_mut();
 
         let addr = this.read_pointer(addr)?;
@@ -131,16 +133,16 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         // as a dealloc.
         #[allow(clippy::arithmetic_side_effects)] // PAGE_SIZE is nonzero
         if addr.addr().bytes() % this.machine.page_size != 0 {
-            this.set_last_error(Scalar::from_i32(this.eval_libc_i32("EINVAL")))?;
+            this.set_last_error(this.eval_libc("EINVAL"))?;
             return Ok(Scalar::from_i32(-1));
         }
 
         let Some(length) = length.checked_next_multiple_of(this.machine.page_size) else {
-            this.set_last_error(Scalar::from_i32(this.eval_libc_i32("EINVAL")))?;
+            this.set_last_error(this.eval_libc("EINVAL"))?;
             return Ok(Scalar::from_i32(-1));
         };
         if length > this.target_usize_max() {
-            this.set_last_error(Scalar::from_i32(this.eval_libc_i32("EINVAL")))?;
+            this.set_last_error(this.eval_libc("EINVAL"))?;
             return Ok(this.eval_libc("MAP_FAILED"));
         }
 

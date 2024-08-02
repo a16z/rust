@@ -120,7 +120,7 @@ pub struct TreeDiff {
 
 impl TreeDiff {
     pub fn into_text_edit(&self, builder: &mut TextEditBuilder) {
-        let _p = tracing::span!(tracing::Level::INFO, "into_text_edit").entered();
+        let _p = tracing::info_span!("into_text_edit").entered();
 
         for (anchor, to) in &self.insertions {
             let offset = match anchor {
@@ -149,7 +149,7 @@ impl TreeDiff {
 ///
 /// This function tries to find a fine-grained diff.
 pub fn diff(from: &SyntaxNode, to: &SyntaxNode) -> TreeDiff {
-    let _p = tracing::span!(tracing::Level::INFO, "diff").entered();
+    let _p = tracing::info_span!("diff").entered();
 
     let mut diff = TreeDiff {
         replacements: FxHashMap::default(),
@@ -255,7 +255,7 @@ pub fn diff(from: &SyntaxNode, to: &SyntaxNode) -> TreeDiff {
 mod tests {
     use expect_test::{expect, Expect};
     use itertools::Itertools;
-    use parser::SyntaxKind;
+    use parser::{Edition, SyntaxKind};
     use text_edit::TextEdit;
 
     use crate::{AstNode, SyntaxElement};
@@ -607,8 +607,8 @@ fn main() {
     }
 
     fn check_diff(from: &str, to: &str, expected_diff: Expect) {
-        let from_node = crate::SourceFile::parse(from).tree().syntax().clone();
-        let to_node = crate::SourceFile::parse(to).tree().syntax().clone();
+        let from_node = crate::SourceFile::parse(from, Edition::CURRENT).tree().syntax().clone();
+        let to_node = crate::SourceFile::parse(to, Edition::CURRENT).tree().syntax().clone();
         let diff = super::diff(&from_node, &to_node);
 
         let line_number =
@@ -643,7 +643,7 @@ fn main() {
         let deletions = diff
             .deletions
             .iter()
-            .format_with("\n", |v, f| f(&format!("Line {}: {}", line_number(v), &fmt_syntax(v))));
+            .format_with("\n", |v, f| f(&format!("Line {}: {}", line_number(v), fmt_syntax(v))));
 
         let actual = format!(
             "insertions:\n\n{insertions}\n\nreplacements:\n\n{replacements}\n\ndeletions:\n\n{deletions}\n"

@@ -1,17 +1,18 @@
+// tidy-alphabetical-start
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![allow(rustc::untranslatable_diagnostic)]
-#![feature(if_let_guard)]
-#![feature(let_chains)]
-#![feature(try_blocks)]
-#![feature(never_type)]
+#![feature(array_windows)]
 #![feature(box_patterns)]
 #![feature(control_flow_enum)]
+#![feature(if_let_guard)]
+#![feature(is_none_or)]
+#![feature(let_chains)]
+#![feature(never_type)]
+#![feature(try_blocks)]
+// tidy-alphabetical-end
 
 #[macro_use]
 extern crate tracing;
-
-#[macro_use]
-extern crate rustc_middle;
 
 mod _match;
 mod autoderef;
@@ -32,7 +33,6 @@ mod fallback;
 mod fn_ctxt;
 mod gather_locals;
 mod intrinsicck;
-mod mem_categorization;
 mod method;
 mod op;
 mod pat;
@@ -44,6 +44,22 @@ mod writeback;
 
 pub use coercion::can_coerce;
 use fn_ctxt::FnCtxt;
+use rustc_data_structures::unord::UnordSet;
+use rustc_errors::codes::*;
+use rustc_errors::{struct_span_code_err, Applicability, ErrorGuaranteed};
+use rustc_hir as hir;
+use rustc_hir::def::{DefKind, Res};
+use rustc_hir::intravisit::Visitor;
+use rustc_hir::{HirId, HirIdMap, Node};
+use rustc_hir_analysis::check::check_abi;
+use rustc_hir_analysis::hir_ty_lowering::HirTyLowerer;
+use rustc_infer::traits::{ObligationCauseCode, ObligationInspector, WellFormedLoc};
+use rustc_middle::query::Providers;
+use rustc_middle::ty::{self, Ty, TyCtxt};
+use rustc_middle::{bug, span_bug};
+use rustc_session::config;
+use rustc_span::def_id::LocalDefId;
+use rustc_span::Span;
 use typeck_root_ctxt::TypeckRootCtxt;
 
 use crate::check::check_fn;
@@ -52,22 +68,6 @@ use crate::diverges::Diverges;
 use crate::expectation::Expectation;
 use crate::fn_ctxt::LoweredTy;
 use crate::gather_locals::GatherLocalsVisitor;
-use rustc_data_structures::unord::UnordSet;
-use rustc_errors::{codes::*, struct_span_code_err, ErrorGuaranteed};
-use rustc_hir as hir;
-use rustc_hir::def::{DefKind, Res};
-use rustc_hir::intravisit::Visitor;
-use rustc_hir::{HirIdMap, Node};
-use rustc_hir_analysis::check::check_abi;
-use rustc_hir_analysis::hir_ty_lowering::HirTyLowerer;
-use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
-use rustc_infer::traits::{ObligationCauseCode, ObligationInspector, WellFormedLoc};
-use rustc_middle::query::Providers;
-use rustc_middle::traits;
-use rustc_middle::ty::{self, Ty, TyCtxt};
-use rustc_session::config;
-use rustc_span::def_id::{DefId, LocalDefId};
-use rustc_span::Span;
 
 rustc_fluent_macro::fluent_messages! { "../messages.ftl" }
 
@@ -82,21 +82,6 @@ macro_rules! type_error_struct {
 
         err
     })
-}
-
-fn has_typeck_results(tcx: TyCtxt<'_>, def_id: DefId) -> bool {
-    // Closures' typeck results come from their outermost function,
-    // as they are part of the same "inference environment".
-    let typeck_root_def_id = tcx.typeck_root_def_id(def_id);
-    if typeck_root_def_id != def_id {
-        return tcx.has_typeck_results(typeck_root_def_id);
-    }
-
-    if let Some(def_id) = def_id.as_local() {
-        tcx.hir_node_by_def_id(def_id).body_id().is_some()
-    } else {
-        false
-    }
 }
 
 fn used_trait_imports(tcx: TyCtxt<'_>, def_id: LocalDefId) -> &UnordSet<LocalDefId> {
@@ -165,7 +150,7 @@ fn typeck_with_fallback<'tcx>(
 
     if let Some(hir::FnSig { header, decl, .. }) = node.fn_sig() {
         let fn_sig = if decl.output.get_infer_ret_ty().is_some() {
-            fcx.lowerer().lower_fn_ty(id, header.unsafety, header.abi, decl, None, None)
+            fcx.lowerer().lower_fn_ty(id, header.safety, header.abi, decl, None, None)
         } else {
             tcx.fn_sig(def_id).instantiate_identity()
         };
@@ -186,7 +171,7 @@ fn typeck_with_fallback<'tcx>(
         let wf_code = ObligationCauseCode::WellFormed(Some(WellFormedLoc::Ty(def_id)));
         fcx.register_wf_obligation(expected_type.into(), body.value.span, wf_code);
 
-        fcx.require_type_is_sized(expected_type, body.value.span, traits::ConstSized);
+        fcx.require_type_is_sized(expected_type, body.value.span, ObligationCauseCode::ConstSized);
 
         // Gather locals in statics (because of block expressions).
         GatherLocalsVisitor::new(&fcx).visit_body(body);
@@ -255,16 +240,19 @@ fn infer_type_if_missing<'tcx>(fcx: &FnCtxt<'_, 'tcx>, node: Node<'tcx>) -> Opti
         if let Some(item) = tcx.opt_associated_item(def_id.into())
             && let ty::AssocKind::Const = item.kind
             && let ty::ImplContainer = item.container
-            && let Some(trait_item) = item.trait_item_def_id
+            && let Some(trait_item_def_id) = item.trait_item_def_id
         {
-            let args =
-                tcx.impl_trait_ref(item.container_id(tcx)).unwrap().instantiate_identity().args;
-            Some(tcx.type_of(trait_item).instantiate(tcx, args))
+            let impl_def_id = item.container_id(tcx);
+            let impl_trait_ref = tcx.impl_trait_ref(impl_def_id).unwrap().instantiate_identity();
+            let args = ty::GenericArgs::identity_for_item(tcx, def_id).rebase_onto(
+                tcx,
+                impl_def_id,
+                impl_trait_ref.args,
+            );
+            tcx.check_args_compatible(trait_item_def_id, args)
+                .then(|| tcx.type_of(trait_item_def_id).instantiate(tcx, args))
         } else {
-            Some(fcx.next_ty_var(TypeVariableOrigin {
-                kind: TypeVariableOriginKind::TypeInference,
-                span,
-            }))
+            Some(fcx.next_ty_var(span))
         }
     } else if let Node::AnonConst(_) = node {
         let id = tcx.local_def_id_to_hir_id(def_id);
@@ -272,10 +260,7 @@ fn infer_type_if_missing<'tcx>(fcx: &FnCtxt<'_, 'tcx>, node: Node<'tcx>) -> Opti
             Node::Ty(&hir::Ty { kind: hir::TyKind::Typeof(ref anon_const), span, .. })
                 if anon_const.hir_id == id =>
             {
-                Some(fcx.next_ty_var(TypeVariableOrigin {
-                    kind: TypeVariableOriginKind::TypeInference,
-                    span,
-                }))
+                Some(fcx.next_ty_var(span))
             }
             Node::Expr(&hir::Expr { kind: hir::ExprKind::InlineAsm(asm), span, .. })
             | Node::Item(&hir::Item { kind: hir::ItemKind::GlobalAsm(asm), span, .. }) => {
@@ -285,10 +270,7 @@ fn infer_type_if_missing<'tcx>(fcx: &FnCtxt<'_, 'tcx>, node: Node<'tcx>) -> Opti
                         Some(fcx.next_int_var())
                     }
                     hir::InlineAsmOperand::SymFn { anon_const } if anon_const.hir_id == id => {
-                        Some(fcx.next_ty_var(TypeVariableOrigin {
-                            kind: TypeVariableOriginKind::MiscVariable,
-                            span,
-                        }))
+                        Some(fcx.next_ty_var(span))
                     }
                     _ => None,
                 })
@@ -348,13 +330,13 @@ pub struct EnclosingBreakables<'tcx> {
 }
 
 impl<'tcx> EnclosingBreakables<'tcx> {
-    fn find_breakable(&mut self, target_id: hir::HirId) -> &mut BreakableCtxt<'tcx> {
+    fn find_breakable(&mut self, target_id: HirId) -> &mut BreakableCtxt<'tcx> {
         self.opt_find_breakable(target_id).unwrap_or_else(|| {
             bug!("could not find enclosing breakable with id {}", target_id);
         })
     }
 
-    fn opt_find_breakable(&mut self, target_id: hir::HirId) -> Option<&mut BreakableCtxt<'tcx>> {
+    fn opt_find_breakable(&mut self, target_id: HirId) -> Option<&mut BreakableCtxt<'tcx>> {
         match self.by_id.get(&target_id) {
             Some(ix) => Some(&mut self.stack[*ix]),
             None => None,
@@ -365,6 +347,7 @@ impl<'tcx> EnclosingBreakables<'tcx> {
 fn report_unexpected_variant_res(
     tcx: TyCtxt<'_>,
     res: Res,
+    expr: Option<&hir::Expr<'_>>,
     qpath: &hir::QPath<'_>,
     span: Span,
     err_code: ErrCode,
@@ -374,8 +357,8 @@ fn report_unexpected_variant_res(
         Res::Def(DefKind::Variant, _) => "struct variant",
         _ => res.descr(),
     };
-    let path_str = rustc_hir_pretty::qpath_to_string(qpath);
-    let err = tcx
+    let path_str = rustc_hir_pretty::qpath_to_string(&tcx, qpath);
+    let mut err = tcx
         .dcx()
         .struct_span_err(span, format!("expected {expected}, found {res_descr} `{path_str}`"))
         .with_code(err_code);
@@ -384,6 +367,61 @@ fn report_unexpected_variant_res(
             let patterns_url = "https://doc.rust-lang.org/book/ch18-00-patterns.html";
             err.with_span_label(span, "`fn` calls are not allowed in patterns")
                 .with_help(format!("for more information, visit {patterns_url}"))
+        }
+        Res::Def(DefKind::Variant, _) if let Some(expr) = expr => {
+            err.span_label(span, format!("not a {expected}"));
+            let variant = tcx.expect_variant_res(res);
+            let sugg = if variant.fields.is_empty() {
+                " {}".to_string()
+            } else {
+                format!(
+                    " {{ {} }}",
+                    variant
+                        .fields
+                        .iter()
+                        .map(|f| format!("{}: /* value */", f.name))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            let descr = "you might have meant to create a new value of the struct";
+            let mut suggestion = vec![];
+            match tcx.parent_hir_node(expr.hir_id) {
+                hir::Node::Expr(hir::Expr {
+                    kind: hir::ExprKind::Call(..),
+                    span: call_span,
+                    ..
+                }) => {
+                    suggestion.push((span.shrink_to_hi().with_hi(call_span.hi()), sugg));
+                }
+                hir::Node::Expr(hir::Expr { kind: hir::ExprKind::Binary(..), hir_id, .. }) => {
+                    suggestion.push((expr.span.shrink_to_lo(), "(".to_string()));
+                    if let hir::Node::Expr(drop_temps) = tcx.parent_hir_node(*hir_id)
+                        && let hir::ExprKind::DropTemps(_) = drop_temps.kind
+                        && let hir::Node::Expr(parent) = tcx.parent_hir_node(drop_temps.hir_id)
+                        && let hir::ExprKind::If(condition, block, None) = parent.kind
+                        && condition.hir_id == drop_temps.hir_id
+                        && let hir::ExprKind::Block(block, _) = block.kind
+                        && block.stmts.is_empty()
+                        && let Some(expr) = block.expr
+                        && let hir::ExprKind::Path(..) = expr.kind
+                    {
+                        // Special case: you can incorrectly write an equality condition:
+                        // if foo == Struct { field } { /* if body */ }
+                        // which should have been written
+                        // if foo == (Struct { field }) { /* if body */ }
+                        suggestion.push((block.span.shrink_to_hi(), ")".to_string()));
+                    } else {
+                        suggestion.push((span.shrink_to_hi().with_hi(expr.span.hi()), sugg));
+                    }
+                }
+                _ => {
+                    suggestion.push((span.shrink_to_hi(), sugg));
+                }
+            }
+
+            err.multipart_suggestion_verbose(descr, suggestion, Applicability::MaybeIncorrect);
+            err
         }
         _ => err.with_span_label(span, format!("not a {expected}")),
     }
@@ -438,11 +476,5 @@ fn fatally_break_rust(tcx: TyCtxt<'_>, span: Span) -> ! {
 
 pub fn provide(providers: &mut Providers) {
     method::provide(providers);
-    *providers = Providers {
-        typeck,
-        diagnostic_only_typeck,
-        has_typeck_results,
-        used_trait_imports,
-        ..*providers
-    };
+    *providers = Providers { typeck, diagnostic_only_typeck, used_trait_imports, ..*providers };
 }

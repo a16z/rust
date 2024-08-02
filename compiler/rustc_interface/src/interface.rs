@@ -1,32 +1,33 @@
-use crate::util;
+use std::path::PathBuf;
+use std::result;
+use std::sync::Arc;
 
-use rustc_ast::token;
-use rustc_ast::{LitKind, MetaItemKind};
+use rustc_ast::{token, LitKind, MetaItemKind};
 use rustc_codegen_ssa::traits::CodegenBackend;
-use rustc_data_structures::defer;
 use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_data_structures::stable_hasher::StableHasher;
 use rustc_data_structures::sync::Lrc;
+use rustc_data_structures::{defer, jobserver};
 use rustc_errors::registry::Registry;
-use rustc_errors::{DiagCtxt, ErrorGuaranteed};
+use rustc_errors::{DiagCtxtHandle, ErrorGuaranteed};
 use rustc_lint::LintStore;
-
 use rustc_middle::ty;
 use rustc_middle::ty::CurrentGcx;
 use rustc_middle::util::Providers;
-use rustc_parse::maybe_new_parser_from_source_str;
+use rustc_parse::new_parser_from_source_str;
+use rustc_parse::parser::attr::AllowLeadingUnsafe;
 use rustc_query_impl::QueryCtxt;
 use rustc_query_system::query::print_query_stack;
 use rustc_session::config::{self, Cfg, CheckCfg, ExpectedValues, Input, OutFileName};
 use rustc_session::filesearch::{self, sysroot_candidates};
 use rustc_session::parse::ParseSess;
 use rustc_session::{lint, CompilerIO, EarlyDiagCtxt, Session};
-use rustc_span::source_map::FileLoader;
+use rustc_span::source_map::{FileLoader, RealFileLoader, SourceMapInputs};
 use rustc_span::symbol::sym;
 use rustc_span::FileName;
-use std::path::PathBuf;
-use std::result;
-use std::sync::Arc;
+use tracing::trace;
+
+use crate::util;
 
 pub type Result<T> = result::Result<T, ErrorGuaranteed>;
 
@@ -45,7 +46,7 @@ pub struct Compiler {
 }
 
 /// Converts strings provided as `--cfg [cfgspec]` into a `Cfg`.
-pub(crate) fn parse_cfg(dcx: &DiagCtxt, cfgs: Vec<String>) -> Cfg {
+pub(crate) fn parse_cfg(dcx: DiagCtxtHandle<'_>, cfgs: Vec<String>) -> Cfg {
     cfgs.into_iter()
         .map(|s| {
             let psess = ParseSess::with_silent_emitter(
@@ -66,8 +67,8 @@ pub(crate) fn parse_cfg(dcx: &DiagCtxt, cfgs: Vec<String>) -> Cfg {
                 };
             }
 
-            match maybe_new_parser_from_source_str(&psess, filename, s.to_string()) {
-                Ok(mut parser) => match parser.parse_meta_item() {
+            match new_parser_from_source_str(&psess, filename, s.to_string()) {
+                Ok(mut parser) => match parser.parse_meta_item(AllowLeadingUnsafe::No) {
                     Ok(meta_item) if parser.token == token::Eof => {
                         if meta_item.path.segments.len() != 1 {
                             error!("argument key must be an identifier");
@@ -104,7 +105,7 @@ pub(crate) fn parse_cfg(dcx: &DiagCtxt, cfgs: Vec<String>) -> Cfg {
 }
 
 /// Converts strings provided as `--check-cfg [specs]` into a `CheckCfg`.
-pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
+pub(crate) fn parse_check_cfg(dcx: DiagCtxtHandle<'_>, specs: Vec<String>) -> CheckCfg {
     // If any --check-cfg is passed then exhaustive_values and exhaustive_names
     // are enabled by default.
     let exhaustive_names = !specs.is_empty();
@@ -119,14 +120,45 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
         );
         let filename = FileName::cfg_spec_source_code(&s);
 
+        const VISIT: &str =
+            "visit <https://doc.rust-lang.org/nightly/rustc/check-cfg.html> for more details";
+
         macro_rules! error {
             ($reason:expr) => {
                 #[allow(rustc::untranslatable_diagnostic)]
                 #[allow(rustc::diagnostic_outside_of_impl)]
-                dcx.fatal(format!(
-                    concat!("invalid `--check-cfg` argument: `{}` (", $reason, ")"),
-                    s
-                ))
+                {
+                    let mut diag =
+                        dcx.struct_fatal(format!("invalid `--check-cfg` argument: `{s}`"));
+                    diag.note($reason);
+                    diag.note(VISIT);
+                    diag.emit()
+                }
+            };
+            (in $arg:expr, $reason:expr) => {
+                #[allow(rustc::untranslatable_diagnostic)]
+                #[allow(rustc::diagnostic_outside_of_impl)]
+                {
+                    let mut diag =
+                        dcx.struct_fatal(format!("invalid `--check-cfg` argument: `{s}`"));
+
+                    let pparg = rustc_ast_pretty::pprust::meta_list_item_to_string($arg);
+                    if let Some(lit) = $arg.lit() {
+                        let (lit_kind_article, lit_kind_descr) = {
+                            let lit_kind = lit.as_token_lit().kind;
+                            (lit_kind.article(), lit_kind.descr())
+                        };
+                        diag.note(format!(
+                            "`{pparg}` is {lit_kind_article} {lit_kind_descr} literal"
+                        ));
+                    } else {
+                        diag.note(format!("`{pparg}` is invalid"));
+                    }
+
+                    diag.note($reason);
+                    diag.note(VISIT);
+                    diag.emit()
+                }
             };
         }
 
@@ -134,7 +166,7 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
             error!("expected `cfg(name, values(\"value1\", \"value2\", ... \"valueN\"))`")
         };
 
-        let mut parser = match maybe_new_parser_from_source_str(&psess, filename, s.to_string()) {
+        let mut parser = match new_parser_from_source_str(&psess, filename, s.to_string()) {
             Ok(parser) => parser,
             Err(errs) => {
                 errs.into_iter().for_each(|err| err.cancel());
@@ -142,7 +174,7 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
             }
         };
 
-        let meta_item = match parser.parse_meta_item() {
+        let meta_item = match parser.parse_meta_item(AllowLeadingUnsafe::Yes) {
             Ok(meta_item) if parser.token == token::Eof => meta_item,
             Ok(..) => expected_error(),
             Err(err) => {
@@ -182,7 +214,7 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
                 }
                 any_specified = true;
                 if !args.is_empty() {
-                    error!("`any()` must be empty");
+                    error!(in arg, "`any()` takes no argument");
                 }
             } else if arg.has_name(sym::values)
                 && let Some(args) = arg.meta_item_list()
@@ -201,25 +233,25 @@ pub(crate) fn parse_check_cfg(dcx: &DiagCtxt, specs: Vec<String>) -> CheckCfg {
                         && let Some(args) = arg.meta_item_list()
                     {
                         if values_any_specified {
-                            error!("`any()` in `values()` cannot be specified multiple times");
+                            error!(in arg, "`any()` in `values()` cannot be specified multiple times");
                         }
                         values_any_specified = true;
                         if !args.is_empty() {
-                            error!("`any()` must be empty");
+                            error!(in arg, "`any()` in `values()` takes no argument");
                         }
                     } else if arg.has_name(sym::none)
                         && let Some(args) = arg.meta_item_list()
                     {
                         values.insert(None);
                         if !args.is_empty() {
-                            error!("`none()` must be empty");
+                            error!(in arg, "`none()` in `values()` takes no argument");
                         }
                     } else {
-                        error!("`values()` arguments must be string literals, `none()` or `any()`");
+                        error!(in arg, "`values()` arguments must be string literals, `none()` or `any()`");
                     }
                 }
             } else {
-                error!("`cfg()` arguments must be simple identifiers, `any()` or `values(...)`");
+                error!(in arg, "`cfg()` arguments must be simple identifiers, `any()` or `values(...)`");
             }
         }
 
@@ -323,6 +355,18 @@ pub struct Config {
     pub expanded_args: Vec<String>,
 }
 
+/// Initialize jobserver before getting `jobserver::client` and `build_session`.
+pub(crate) fn initialize_checked_jobserver(early_dcx: &EarlyDiagCtxt) {
+    jobserver::initialize_checked(|err| {
+        #[allow(rustc::untranslatable_diagnostic)]
+        #[allow(rustc::diagnostic_outside_of_impl)]
+        early_dcx
+            .early_struct_warn(err)
+            .with_note("the build environment is likely misconfigured")
+            .emit()
+    });
+}
+
 // JUSTIFICATION: before session exists, only config
 #[allow(rustc::bad_opt_access)]
 #[allow(rustc::untranslatable_diagnostic)] // FIXME: make this translatable
@@ -334,19 +378,25 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
 
     // Check jobserver before run_in_thread_pool_with_globals, which call jobserver::acquire_thread
     let early_dcx = EarlyDiagCtxt::new(config.opts.error_format);
-    early_dcx.initialize_checked_jobserver();
+    initialize_checked_jobserver(&early_dcx);
+
+    crate::callbacks::setup_callbacks();
+
+    let sysroot = filesearch::materialize_sysroot(config.opts.maybe_sysroot.clone());
+    let target = config::build_target_config(&early_dcx, &config.opts, &sysroot);
+    let file_loader = config.file_loader.unwrap_or_else(|| Box::new(RealFileLoader));
+    let path_mapping = config.opts.file_path_mapping();
+    let hash_kind = config.opts.unstable_opts.src_hash_algorithm(&target);
 
     util::run_in_thread_pool_with_globals(
+        &early_dcx,
         config.opts.edition,
         config.opts.unstable_opts.threads,
+        SourceMapInputs { file_loader, path_mapping, hash_kind },
         |current_gcx| {
-            crate::callbacks::setup_callbacks();
-
+            // The previous `early_dcx` can't be reused here because it doesn't
+            // impl `Send`. Creating a new one is fine.
             let early_dcx = EarlyDiagCtxt::new(config.opts.error_format);
-
-            let sysroot = filesearch::materialize_sysroot(config.opts.maybe_sysroot.clone());
-
-            let target = config::build_target_config(&early_dcx, &config.opts, &sysroot);
 
             let codegen_backend = match config.make_codegen_backend {
                 None => util::get_codegen_backend(
@@ -372,9 +422,7 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
                 config.opts.unstable_opts.translate_directionality_markers,
             ) {
                 Ok(bundle) => bundle,
-                Err(e) => {
-                    early_dcx.early_fatal(format!("failed to load fluent bundle: {e}"));
-                }
+                Err(e) => early_dcx.early_fatal(format!("failed to load fluent bundle: {e}")),
             };
 
             let mut locale_resources = Vec::from(config.locale_resources);
@@ -393,7 +441,6 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
                 config.registry.clone(),
                 locale_resources,
                 config.lint_caps,
-                config.file_loader,
                 target,
                 sysroot,
                 util::rustc_version_str().unwrap_or("unknown"),
@@ -404,12 +451,12 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
 
             codegen_backend.init(&sess);
 
-            let cfg = parse_cfg(&sess.dcx(), config.crate_cfg);
+            let cfg = parse_cfg(sess.dcx(), config.crate_cfg);
             let mut cfg = config::build_configuration(&sess, cfg);
             util::add_configuration(&mut cfg, &mut sess, &*codegen_backend);
             sess.psess.config = cfg;
 
-            let mut check_cfg = parse_check_cfg(&sess.dcx(), config.crate_check_cfg);
+            let mut check_cfg = parse_check_cfg(sess.dcx(), config.crate_check_cfg);
             check_cfg.fill_well_known(&sess.target);
             sess.psess.check_config = check_cfg;
 
@@ -440,51 +487,46 @@ pub fn run_compiler<R: Send>(config: Config, f: impl FnOnce(&Compiler) -> R + Se
                 current_gcx,
             };
 
-            rustc_span::set_source_map(compiler.sess.psess.clone_source_map(), move || {
-                // There are two paths out of `f`.
-                // - Normal exit.
-                // - Panic, e.g. triggered by `abort_if_errors`.
-                //
-                // We must run `finish_diagnostics` in both cases.
-                let res = {
-                    // If `f` panics, `finish_diagnostics` will run during
-                    // unwinding because of the `defer`.
-                    let mut guar = None;
-                    let sess_abort_guard = defer(|| {
-                        guar = compiler.sess.finish_diagnostics(&config.registry);
-                    });
+            // There are two paths out of `f`.
+            // - Normal exit.
+            // - Panic, e.g. triggered by `abort_if_errors`.
+            //
+            // We must run `finish_diagnostics` in both cases.
+            let res = {
+                // If `f` panics, `finish_diagnostics` will run during
+                // unwinding because of the `defer`.
+                let sess_abort_guard = defer(|| {
+                    compiler.sess.finish_diagnostics(&config.registry);
+                });
 
-                    let res = f(&compiler);
+                let res = f(&compiler);
 
-                    // If `f` doesn't panic, `finish_diagnostics` will run
-                    // normally when `sess_abort_guard` is dropped.
-                    drop(sess_abort_guard);
+                // If `f` doesn't panic, `finish_diagnostics` will run
+                // normally when `sess_abort_guard` is dropped.
+                drop(sess_abort_guard);
 
-                    // If `finish_diagnostics` emits errors (e.g. stashed
-                    // errors) we can't return an error directly, because the
-                    // return type of this function is `R`, not `Result<R, E>`.
-                    // But we need to communicate the errors' existence to the
-                    // caller, otherwise the caller might mistakenly think that
-                    // no errors occurred and return a zero exit code. So we
-                    // abort (panic) instead, similar to if `f` had panicked.
-                    if guar.is_some() {
-                        compiler.sess.dcx().abort_if_errors();
-                    }
-
-                    res
-                };
-
-                let prof = compiler.sess.prof.clone();
-                prof.generic_activity("drop_compiler").run(move || drop(compiler));
+                // If error diagnostics have been emitted, we can't return an
+                // error directly, because the return type of this function
+                // is `R`, not `Result<R, E>`. But we need to communicate the
+                // errors' existence to the caller, otherwise the caller might
+                // mistakenly think that no errors occurred and return a zero
+                // exit code. So we abort (panic) instead, similar to if `f`
+                // had panicked.
+                compiler.sess.dcx().abort_if_errors();
 
                 res
-            })
+            };
+
+            let prof = compiler.sess.prof.clone();
+            prof.generic_activity("drop_compiler").run(move || drop(compiler));
+
+            res
         },
     )
 }
 
 pub fn try_print_query_stack(
-    dcx: &DiagCtxt,
+    dcx: DiagCtxtHandle<'_>,
     num_frames: Option<usize>,
     file: Option<std::fs::File>,
 ) {

@@ -5,7 +5,7 @@ use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::{LocalDefId, LocalModDefId};
 use rustc_hir::intravisit::Visitor;
-use rustc_hir::{ExprKind, InlineAsmOperand, StmtKind};
+use rustc_hir::{ExprKind, HirIdSet, InlineAsmOperand, StmtKind};
 use rustc_middle::query::Providers;
 use rustc_middle::ty::TyCtxt;
 use rustc_session::lint::builtin::UNDEFINED_NAKED_FUNCTION_ABI;
@@ -14,9 +14,8 @@ use rustc_span::Span;
 use rustc_target::spec::abi::Abi;
 
 use crate::errors::{
-    CannotInlineNakedFunction, NakedFunctionsAsmBlock, NakedFunctionsAsmOptions,
-    NakedFunctionsMustUseNoreturn, NakedFunctionsOperands, NoPatterns, ParamsNotAllowed,
-    UndefinedNakedFunctionAbi,
+    NakedFunctionsAsmBlock, NakedFunctionsAsmOptions, NakedFunctionsMustUseNoreturn,
+    NakedFunctionsOperands, NoPatterns, ParamsNotAllowed, UndefinedNakedFunctionAbi,
 };
 
 pub(crate) fn provide(providers: &mut Providers) {
@@ -53,15 +52,6 @@ fn check_mod_naked_functions(tcx: TyCtxt<'_>, module_def_id: LocalModDefId) {
         check_no_patterns(tcx, body.params);
         check_no_parameters_use(tcx, body);
         check_asm(tcx, def_id, body);
-        check_inline(tcx, def_id);
-    }
-}
-
-/// Check that the function isn't inlined.
-fn check_inline(tcx: TyCtxt<'_>, def_id: LocalDefId) {
-    let attrs = tcx.get_attrs(def_id, sym::inline);
-    for attr in attrs {
-        tcx.dcx().emit_err(CannotInlineNakedFunction { span: attr.span });
     }
 }
 
@@ -83,8 +73,7 @@ fn check_abi(tcx: TyCtxt<'_>, def_id: LocalDefId, abi: Abi) {
 fn check_no_patterns(tcx: TyCtxt<'_>, params: &[hir::Param<'_>]) {
     for param in params {
         match param.pat.kind {
-            hir::PatKind::Wild
-            | hir::PatKind::Binding(hir::BindingAnnotation::NONE, _, _, None) => {}
+            hir::PatKind::Wild | hir::PatKind::Binding(hir::BindingMode::NONE, _, _, None) => {}
             _ => {
                 tcx.dcx().emit_err(NoPatterns { span: param.pat.span });
             }
@@ -94,7 +83,7 @@ fn check_no_patterns(tcx: TyCtxt<'_>, params: &[hir::Param<'_>]) {
 
 /// Checks that function parameters aren't used in the function body.
 fn check_no_parameters_use<'tcx>(tcx: TyCtxt<'tcx>, body: &'tcx hir::Body<'tcx>) {
-    let mut params = hir::HirIdSet::default();
+    let mut params = HirIdSet::default();
     for param in body.params {
         param.pat.each_binding(|_binding_mode, hir_id, _span, _ident| {
             params.insert(hir_id);
@@ -105,7 +94,7 @@ fn check_no_parameters_use<'tcx>(tcx: TyCtxt<'tcx>, body: &'tcx hir::Body<'tcx>)
 
 struct CheckParameters<'tcx> {
     tcx: TyCtxt<'tcx>,
-    params: hir::HirIdSet,
+    params: HirIdSet,
 }
 
 impl<'tcx> Visitor<'tcx> for CheckParameters<'tcx> {
@@ -245,22 +234,16 @@ impl<'tcx> CheckInlineAssembly<'tcx> {
             self.tcx.dcx().emit_err(NakedFunctionsOperands { unsupported_operands });
         }
 
-        let unsupported_options: Vec<&'static str> = [
-            (InlineAsmOptions::MAY_UNWIND, "`may_unwind`"),
-            (InlineAsmOptions::NOMEM, "`nomem`"),
-            (InlineAsmOptions::NOSTACK, "`nostack`"),
-            (InlineAsmOptions::PRESERVES_FLAGS, "`preserves_flags`"),
-            (InlineAsmOptions::PURE, "`pure`"),
-            (InlineAsmOptions::READONLY, "`readonly`"),
-        ]
-        .iter()
-        .filter_map(|&(option, name)| if asm.options.contains(option) { Some(name) } else { None })
-        .collect();
-
+        let unsupported_options = asm.options.difference(InlineAsmOptions::NAKED_OPTIONS);
         if !unsupported_options.is_empty() {
             self.tcx.dcx().emit_err(NakedFunctionsAsmOptions {
                 span,
-                unsupported_options: unsupported_options.join(", "),
+                unsupported_options: unsupported_options
+                    .human_readable_names()
+                    .into_iter()
+                    .map(|name| format!("`{name}`"))
+                    .collect::<Vec<_>>()
+                    .join(", "),
             });
         }
 

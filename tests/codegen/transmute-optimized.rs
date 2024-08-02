@@ -1,12 +1,13 @@
 //@ compile-flags: -O -Z merge-functions=disabled
 #![crate_type = "lib"]
-#![feature(generic_nonzero)]
 
 // This tests that LLVM can optimize based on the niches in the source or
 // destination types for transmutes.
 
 #[repr(u32)]
-pub enum AlwaysZero32 { X = 0 }
+pub enum AlwaysZero32 {
+    X = 0,
+}
 
 // CHECK-LABEL: i32 @issue_109958(i32
 #[no_mangle]
@@ -82,7 +83,11 @@ pub fn div_transmute_nonzero(a: u32, b: std::num::NonZero<i32>) -> u32 {
 }
 
 #[repr(i8)]
-pub enum OneTwoThree { One = 1, Two = 2, Three = 3 }
+pub enum OneTwoThree {
+    One = 1,
+    Two = 2,
+    Three = 3,
+}
 
 // CHECK-LABEL: i8 @ordering_transmute_onetwothree(i8
 #[no_mangle]

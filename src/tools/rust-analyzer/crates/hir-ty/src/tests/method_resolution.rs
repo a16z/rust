@@ -658,7 +658,7 @@ fn infer_call_trait_method_on_generic_param_1() {
         }
         "#,
         expect![[r#"
-            29..33 'self': &Self
+            29..33 'self': &'? Self
             63..64 't': T
             69..88 '{     ...d(); }': ()
             75..76 't': T
@@ -679,7 +679,7 @@ fn infer_call_trait_method_on_generic_param_2() {
         }
         "#,
         expect![[r#"
-            32..36 'self': &Self
+            32..36 'self': &'? Self
             70..71 't': T
             76..95 '{     ...d(); }': ()
             82..83 't': T
@@ -757,7 +757,7 @@ struct S;
 impl Clone for S {}
 impl Clone for &S {}
 fn test() { (S.clone(), (&S).clone(), (&&S).clone()); }
-          //^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ (S, S, &S)
+          //^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ (S, S, &'? S)
 "#,
     );
 }
@@ -1150,12 +1150,12 @@ fn dyn_trait_super_trait_not_in_scope() {
         }
         "#,
         expect![[r#"
-            51..55 'self': &Self
+            51..55 'self': &'? Self
             64..69 '{ 0 }': u32
             66..67 '0': u32
-            176..177 'd': &dyn Trait
+            176..177 'd': &'? dyn Trait
             191..207 '{     ...o(); }': ()
-            197..198 'd': &dyn Trait
+            197..198 'd': &'? dyn Trait
             197..204 'd.foo()': u32
         "#]],
     );
@@ -1182,15 +1182,15 @@ fn test() {
 }
 "#,
         expect![[r#"
-            75..79 'self': &S
+            75..79 'self': &'? S
             89..109 '{     ...     }': bool
             99..103 'true': bool
             123..167 '{     ...o(); }': ()
-            133..134 's': &S
-            137..151 'unsafe { f() }': &S
-            146..147 'f': fn f() -> &S
-            146..149 'f()': &S
-            157..158 's': &S
+            133..134 's': &'? S
+            137..151 'unsafe { f() }': &'static S
+            146..147 'f': fn f() -> &'static S
+            146..149 'f()': &'static S
+            157..158 's': &'? S
             157..164 's.foo()': bool
         "#]],
     );
@@ -1601,11 +1601,11 @@ use core::IntoIterator;
 fn f() {
     let v = [4].into_iter();
     v;
-  //^ &i32
+  //^ &'? i32
 
     let a = [0, 1].into_iter();
     a;
-  //^ &i32
+  //^ &'? i32
 }
 
 //- /main2021.rs crate:main2021 deps:core edition:2021
@@ -1618,11 +1618,60 @@ fn f() {
 
     let a = [0, 1].into_iter();
     a;
-  //^ &i32
+  //^ &'? i32
 }
 
 //- /core.rs crate:core
 #[rustc_skip_array_during_method_dispatch]
+pub trait IntoIterator {
+    type Out;
+    fn into_iter(self) -> Self::Out;
+}
+
+impl<T> IntoIterator for [T; 1] {
+    type Out = T;
+    fn into_iter(self) -> Self::Out { loop {} }
+}
+impl<'a, T> IntoIterator for &'a [T] {
+    type Out = &'a T;
+    fn into_iter(self) -> Self::Out { loop {} }
+}
+    "#,
+    );
+}
+
+#[test]
+fn skip_during_method_dispatch() {
+    check_types(
+        r#"
+//- /main2018.rs crate:main2018 deps:core edition:2018
+use core::IntoIterator;
+
+fn f() {
+    let v = [4].into_iter();
+    v;
+  //^ &'? i32
+
+    let a = [0, 1].into_iter();
+    a;
+  //^ &'? i32
+}
+
+//- /main2021.rs crate:main2021 deps:core edition:2021
+use core::IntoIterator;
+
+fn f() {
+    let v = [4].into_iter();
+    v;
+  //^ i32
+
+    let a = [0, 1].into_iter();
+    a;
+  //^ &'? i32
+}
+
+//- /core.rs crate:core
+#[rustc_skip_during_method_dispatch(array, boxed_slice)]
 pub trait IntoIterator {
     type Out;
     fn into_iter(self) -> Self::Out;
@@ -1767,7 +1816,7 @@ fn test() {
     let a2 = A(make(), 1i32);
     let _: &str = a2.thing();
     a2;
-  //^^ A<C<&str>, i32>
+  //^^ A<C<&'? str>, i32>
 }
 "#,
     );
@@ -2046,6 +2095,45 @@ use core::mem::ManuallyDrop;
 fn test() {
     ManuallyDrop::new(Foo).foo();
   //^^^^^^^^^^^^^^^^^^^^^^ adjustments: Deref(Some(OverloadedDeref(Some(Not)))), Borrow(Ref(Not))
+}
+"#,
+    );
+}
+
+#[test]
+fn mismatched_args_due_to_supertraits_with_deref() {
+    check_no_mismatches(
+        r#"
+//- minicore: deref
+use core::ops::Deref;
+
+trait Trait1 {
+    type Assoc: Deref<Target = String>;
+}
+
+trait Trait2: Trait1 {
+}
+
+trait Trait3 {
+    type T1: Trait1;
+    type T2: Trait2;
+    fn bar(&self, x: bool, y: bool);
+}
+
+struct Foo;
+
+impl Foo {
+    fn bar(&mut self, _: &'static str) {}
+}
+
+impl Deref for Foo {
+    type Target = u32;
+    fn deref(&self) -> &Self::Target { &0 }
+}
+
+fn problem_method<T: Trait3>() {
+    let mut foo = Foo;
+    foo.bar("hello"); // Rustc ok, RA errors (mismatched args)
 }
 "#,
     );

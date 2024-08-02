@@ -20,7 +20,7 @@ fn err_sb_ub<'tcx>(
 #[derive(Clone, Debug)]
 pub struct AllocHistory {
     id: AllocId,
-    base: (Item, Span),
+    root: (Item, Span),
     creations: smallvec::SmallVec<[Creation; 1]>,
     invalidations: smallvec::SmallVec<[Invalidation; 1]>,
     protectors: smallvec::SmallVec<[Protection; 1]>,
@@ -115,29 +115,29 @@ pub struct TagHistory {
     pub protected: Option<(String, SpanData)>,
 }
 
-pub struct DiagnosticCxBuilder<'ecx, 'mir, 'tcx> {
+pub struct DiagnosticCxBuilder<'ecx, 'tcx> {
     operation: Operation,
-    machine: &'ecx MiriMachine<'mir, 'tcx>,
+    machine: &'ecx MiriMachine<'tcx>,
 }
 
-pub struct DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
+pub struct DiagnosticCx<'history, 'ecx, 'tcx> {
     operation: Operation,
-    machine: &'ecx MiriMachine<'mir, 'tcx>,
+    machine: &'ecx MiriMachine<'tcx>,
     history: &'history mut AllocHistory,
     offset: Size,
 }
 
-impl<'ecx, 'mir, 'tcx> DiagnosticCxBuilder<'ecx, 'mir, 'tcx> {
+impl<'ecx, 'tcx> DiagnosticCxBuilder<'ecx, 'tcx> {
     pub fn build<'history>(
         self,
         history: &'history mut AllocHistory,
         offset: Size,
-    ) -> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
+    ) -> DiagnosticCx<'history, 'ecx, 'tcx> {
         DiagnosticCx { operation: self.operation, machine: self.machine, history, offset }
     }
 
     pub fn retag(
-        machine: &'ecx MiriMachine<'mir, 'tcx>,
+        machine: &'ecx MiriMachine<'tcx>,
         info: RetagInfo,
         new_tag: BorTag,
         orig_tag: ProvenanceExtra,
@@ -149,17 +149,13 @@ impl<'ecx, 'mir, 'tcx> DiagnosticCxBuilder<'ecx, 'mir, 'tcx> {
         DiagnosticCxBuilder { machine, operation }
     }
 
-    pub fn read(
-        machine: &'ecx MiriMachine<'mir, 'tcx>,
-        tag: ProvenanceExtra,
-        range: AllocRange,
-    ) -> Self {
+    pub fn read(machine: &'ecx MiriMachine<'tcx>, tag: ProvenanceExtra, range: AllocRange) -> Self {
         let operation = Operation::Access(AccessOp { kind: AccessKind::Read, tag, range });
         DiagnosticCxBuilder { machine, operation }
     }
 
     pub fn write(
-        machine: &'ecx MiriMachine<'mir, 'tcx>,
+        machine: &'ecx MiriMachine<'tcx>,
         tag: ProvenanceExtra,
         range: AllocRange,
     ) -> Self {
@@ -167,14 +163,14 @@ impl<'ecx, 'mir, 'tcx> DiagnosticCxBuilder<'ecx, 'mir, 'tcx> {
         DiagnosticCxBuilder { machine, operation }
     }
 
-    pub fn dealloc(machine: &'ecx MiriMachine<'mir, 'tcx>, tag: ProvenanceExtra) -> Self {
+    pub fn dealloc(machine: &'ecx MiriMachine<'tcx>, tag: ProvenanceExtra) -> Self {
         let operation = Operation::Dealloc(DeallocOp { tag });
         DiagnosticCxBuilder { machine, operation }
     }
 }
 
-impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
-    pub fn unbuild(self) -> DiagnosticCxBuilder<'ecx, 'mir, 'tcx> {
+impl<'history, 'ecx, 'tcx> DiagnosticCx<'history, 'ecx, 'tcx> {
+    pub fn unbuild(self) -> DiagnosticCxBuilder<'ecx, 'tcx> {
         DiagnosticCxBuilder { machine: self.machine, operation: self.operation }
     }
 }
@@ -222,10 +218,10 @@ struct DeallocOp {
 }
 
 impl AllocHistory {
-    pub fn new(id: AllocId, item: Item, machine: &MiriMachine<'_, '_>) -> Self {
+    pub fn new(id: AllocId, item: Item, machine: &MiriMachine<'_>) -> Self {
         Self {
             id,
-            base: (item, machine.current_span()),
+            root: (item, machine.current_span()),
             creations: SmallVec::new(),
             invalidations: SmallVec::new(),
             protectors: SmallVec::new(),
@@ -239,7 +235,7 @@ impl AllocHistory {
     }
 }
 
-impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
+impl<'history, 'ecx, 'tcx> DiagnosticCx<'history, 'ecx, 'tcx> {
     pub fn start_grant(&mut self, perm: Permission) {
         let Operation::Retag(op) = &mut self.operation else {
             unreachable!(
@@ -342,15 +338,15 @@ impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
                 })
             })
             .or_else(|| {
-                // If we didn't find a retag that created this tag, it might be the base tag of
+                // If we didn't find a retag that created this tag, it might be the root tag of
                 // this allocation.
-                if self.history.base.0.tag() == tag {
+                if self.history.root.0.tag() == tag {
                     Some((
                         format!(
-                            "{tag:?} was created here, as the base tag for {:?}",
+                            "{tag:?} was created here, as the root tag for {:?}",
                             self.history.id
                         ),
-                        self.history.base.1.data(),
+                        self.history.root.1.data(),
                     ))
                 } else {
                     None
@@ -438,7 +434,7 @@ impl<'history, 'ecx, 'mir, 'tcx> DiagnosticCx<'history, 'ecx, 'mir, 'tcx> {
             .machine
             .threads
             .all_stacks()
-            .flatten()
+            .flat_map(|(_id, stack)| stack)
             .map(|frame| {
                 frame.extra.borrow_tracker.as_ref().expect("we should have borrow tracking data")
             })

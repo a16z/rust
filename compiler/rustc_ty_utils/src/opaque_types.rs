@@ -1,12 +1,14 @@
 use rustc_data_structures::fx::FxHashSet;
+use rustc_hir::def::DefKind;
+use rustc_hir::def_id::LocalDefId;
 use rustc_hir::intravisit::Visitor;
-use rustc_hir::{def::DefKind, def_id::LocalDefId};
 use rustc_hir::{intravisit, CRATE_HIR_ID};
+use rustc_middle::bug;
 use rustc_middle::query::Providers;
 use rustc_middle::ty::util::{CheckRegions, NotUniqueParam};
-use rustc_middle::ty::{self, Ty, TyCtxt};
-use rustc_middle::ty::{TypeSuperVisitable, TypeVisitable, TypeVisitor};
+use rustc_middle::ty::{self, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitor};
 use rustc_span::Span;
+use tracing::{instrument, trace};
 
 use crate::errors::{DuplicateArg, NotParam};
 
@@ -107,7 +109,7 @@ impl<'tcx> OpaqueTypeCollector<'tcx> {
 
     #[instrument(level = "trace", skip(self))]
     fn collect_taits_declared_in_body(&mut self) {
-        let body = self.tcx.hir().body(self.tcx.hir().body_owned_by(self.item)).value;
+        let body = self.tcx.hir().body_owned_by(self.item).value;
         struct TaitInBodyFinder<'a, 'tcx> {
             collector: &'a mut OpaqueTypeCollector<'tcx>,
         }
@@ -130,7 +132,7 @@ impl<'tcx> OpaqueTypeCollector<'tcx> {
         TaitInBodyFinder { collector: self }.visit_expr(body);
     }
 
-    fn visit_opaque_ty(&mut self, alias_ty: &ty::AliasTy<'tcx>) {
+    fn visit_opaque_ty(&mut self, alias_ty: ty::AliasTy<'tcx>) {
         if !self.seen.insert(alias_ty.def_id.expect_local()) {
             return;
         }
@@ -167,10 +169,8 @@ impl<'tcx> OpaqueTypeCollector<'tcx> {
                 // Collect opaque types nested within the associated type bounds of this opaque type.
                 // We use identity args here, because we already know that the opaque type uses
                 // only generic parameters, and thus instantiating would not give us more information.
-                for (pred, span) in self
-                    .tcx
-                    .explicit_item_bounds(alias_ty.def_id)
-                    .instantiate_identity_iter_copied()
+                for (pred, span) in
+                    self.tcx.explicit_item_bounds(alias_ty.def_id).iter_identity_copied()
                 {
                     trace!(?pred);
                     self.visit_spanned(span, pred);
@@ -205,7 +205,7 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for OpaqueTypeCollector<'tcx> {
     #[instrument(skip(self), ret, level = "trace")]
     fn visit_ty(&mut self, t: Ty<'tcx>) {
         t.super_visit_with(self);
-        match t.kind() {
+        match *t.kind() {
             ty::Alias(ty::Opaque, alias_ty) if alias_ty.def_id.is_local() => {
                 self.visit_opaque_ty(alias_ty);
             }
@@ -279,7 +279,7 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for OpaqueTypeCollector<'tcx> {
                     // assumption to the `param_env` of the default method. We also separately
                     // rely on that assumption here.
                     let ty = self.tcx.type_of(alias_ty.def_id).instantiate(self.tcx, alias_ty.args);
-                    let ty::Alias(ty::Opaque, alias_ty) = ty.kind() else { bug!("{ty:?}") };
+                    let ty::Alias(ty::Opaque, alias_ty) = *ty.kind() else { bug!("{ty:?}") };
                     self.visit_opaque_ty(alias_ty);
                 }
             }

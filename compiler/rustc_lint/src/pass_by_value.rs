@@ -1,10 +1,12 @@
-use crate::lints::PassByValueDiag;
-use crate::{LateContext, LateLintPass, LintContext};
 use rustc_hir as hir;
 use rustc_hir::def::Res;
 use rustc_hir::{GenericArg, PathSegment, QPath, TyKind};
 use rustc_middle::ty;
+use rustc_session::{declare_lint_pass, declare_tool_lint};
 use rustc_span::symbol::sym;
+
+use crate::lints::PassByValueDiag;
+use crate::{LateContext, LateLintPass, LintContext};
 
 declare_tool_lint! {
     /// The `rustc_pass_by_value` lint marks a type with `#[rustc_pass_by_value]` requiring it to
@@ -73,9 +75,12 @@ fn gen_args(cx: &LateContext<'_>, segment: &PathSegment<'_>) -> String {
                 GenericArg::Type(ty) => {
                     cx.tcx.sess.source_map().span_to_snippet(ty.span).unwrap_or_else(|_| "_".into())
                 }
-                GenericArg::Const(c) => {
-                    cx.tcx.sess.source_map().span_to_snippet(c.span).unwrap_or_else(|_| "_".into())
-                }
+                GenericArg::Const(c) => cx
+                    .tcx
+                    .sess
+                    .source_map()
+                    .span_to_snippet(c.span())
+                    .unwrap_or_else(|_| "_".into()),
                 GenericArg::Infer(_) => String::from("_"),
             })
             .collect::<Vec<_>>();

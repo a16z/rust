@@ -11,7 +11,7 @@ LL |     unsafe { &mut GLOBAL_MUT_T }
 help: use `addr_of_mut!` instead to create a raw pointer
    |
 LL |     unsafe { addr_of_mut!(GLOBAL_MUT_T) }
-   |              ~~~~~~~~~~~~~~~~~~~~~~~~~~
+   |              ~~~~~~~~~~~~~            +
 
 error[E0507]: cannot move out of a mutable reference
   --> $DIR/issue-20801.rs:27:22
@@ -19,6 +19,14 @@ error[E0507]: cannot move out of a mutable reference
 LL |     let a = unsafe { *mut_ref() };
    |                      ^^^^^^^^^^ move occurs because value has type `T`, which does not implement the `Copy` trait
    |
+note: if `T` implemented `Clone`, you could clone the value
+  --> $DIR/issue-20801.rs:3:1
+   |
+LL | struct T(u8);
+   | ^^^^^^^^ consider implementing `Clone` for this type
+...
+LL |     let a = unsafe { *mut_ref() };
+   |                      ---------- you could clone this value
 help: consider removing the dereference here
    |
 LL -     let a = unsafe { *mut_ref() };
@@ -31,6 +39,14 @@ error[E0507]: cannot move out of a shared reference
 LL |     let b = unsafe { *imm_ref() };
    |                      ^^^^^^^^^^ move occurs because value has type `T`, which does not implement the `Copy` trait
    |
+note: if `T` implemented `Clone`, you could clone the value
+  --> $DIR/issue-20801.rs:3:1
+   |
+LL | struct T(u8);
+   | ^^^^^^^^ consider implementing `Clone` for this type
+...
+LL |     let b = unsafe { *imm_ref() };
+   |                      ---------- you could clone this value
 help: consider removing the dereference here
    |
 LL -     let b = unsafe { *imm_ref() };
@@ -43,11 +59,14 @@ error[E0507]: cannot move out of a raw pointer
 LL |     let c = unsafe { *mut_ptr() };
    |                      ^^^^^^^^^^ move occurs because value has type `T`, which does not implement the `Copy` trait
    |
-help: consider removing the dereference here
+note: if `T` implemented `Clone`, you could clone the value
+  --> $DIR/issue-20801.rs:3:1
    |
-LL -     let c = unsafe { *mut_ptr() };
-LL +     let c = unsafe { mut_ptr() };
-   |
+LL | struct T(u8);
+   | ^^^^^^^^ consider implementing `Clone` for this type
+...
+LL |     let c = unsafe { *mut_ptr() };
+   |                      ---------- you could clone this value
 
 error[E0507]: cannot move out of a raw pointer
   --> $DIR/issue-20801.rs:36:22
@@ -55,11 +74,14 @@ error[E0507]: cannot move out of a raw pointer
 LL |     let d = unsafe { *const_ptr() };
    |                      ^^^^^^^^^^^^ move occurs because value has type `T`, which does not implement the `Copy` trait
    |
-help: consider removing the dereference here
+note: if `T` implemented `Clone`, you could clone the value
+  --> $DIR/issue-20801.rs:3:1
    |
-LL -     let d = unsafe { *const_ptr() };
-LL +     let d = unsafe { const_ptr() };
-   |
+LL | struct T(u8);
+   | ^^^^^^^^ consider implementing `Clone` for this type
+...
+LL |     let d = unsafe { *const_ptr() };
+   |                      ------------ you could clone this value
 
 error: aborting due to 4 previous errors; 1 warning emitted
 

@@ -8,12 +8,11 @@ use clippy_utils::{get_expr_use_or_unification_node, is_lint_allowed, path_def_i
 use hir::LifetimeName;
 use rustc_errors::{Applicability, MultiSpan};
 use rustc_hir::def_id::DefId;
-use rustc_hir::hir_id::HirIdMap;
+use rustc_hir::hir_id::{HirId, HirIdMap};
 use rustc_hir::intravisit::{walk_expr, Visitor};
 use rustc_hir::{
-    self as hir, AnonConst, BinOpKind, BindingAnnotation, Body, Expr, ExprKind, FnRetTy, FnSig, GenericArg,
-    ImplItemKind, ItemKind, Lifetime, Mutability, Node, Param, PatKind, QPath, TraitFn, TraitItem, TraitItemKind,
-    TyKind, Unsafety,
+    self as hir, AnonConst, BinOpKind, BindingMode, Body, Expr, ExprKind, FnRetTy, FnSig, GenericArg, ImplItemKind,
+    ItemKind, Lifetime, Mutability, Node, Param, PatKind, QPath, Safety, TraitFn, TraitItem, TraitItemKind, TyKind,
 };
 use rustc_infer::infer::TyCtxtInferExt;
 use rustc_infer::traits::{Obligation, ObligationCause};
@@ -189,7 +188,7 @@ impl<'tcx> LateLintPass<'tcx> for Ptr {
         }
     }
 
-    fn check_body(&mut self, cx: &LateContext<'tcx>, body: &'tcx Body<'_>) {
+    fn check_body(&mut self, cx: &LateContext<'tcx>, body: &Body<'tcx>) {
         let hir = cx.tcx.hir();
         let mut parents = hir.parent_iter(body.value.hir_id);
         let (item_id, sig, is_trait_item) = match parents.next() {
@@ -324,7 +323,7 @@ struct PtrArgReplacement {
 
 struct PtrArg<'tcx> {
     idx: usize,
-    emission_id: hir::HirId,
+    emission_id: HirId,
     span: Span,
     ty_did: DefId,
     ty_name: Symbol,
@@ -461,13 +460,19 @@ fn check_fn_args<'cx, 'tcx: 'cx>(
                             }
                             None
                         }) {
-                            if !lifetime.is_anonymous()
+                            if let LifetimeName::Param(param_def_id) = lifetime.res
+                                && !lifetime.is_anonymous()
                                 && fn_sig
                                     .output()
                                     .walk()
                                     .filter_map(|arg| {
                                         arg.as_region().and_then(|lifetime| match lifetime.kind() {
-                                            ty::ReEarlyParam(r) => Some(r.def_id),
+                                            ty::ReEarlyParam(r) => Some(
+                                                cx.tcx
+                                                    .generics_of(cx.tcx.parent(param_def_id.to_def_id()))
+                                                    .region_param(r, cx.tcx)
+                                                    .def_id,
+                                            ),
                                             ty::ReBound(_, r) => r.kind.get_id(),
                                             ty::ReLateParam(r) => r.bound_region.get_id(),
                                             ty::ReStatic
@@ -477,14 +482,7 @@ fn check_fn_args<'cx, 'tcx: 'cx>(
                                             | ty::ReError(_) => None,
                                         })
                                     })
-                                    .any(|def_id| {
-                                        matches!(
-                                            lifetime.res,
-                                            LifetimeName::Param(param_def_id) if def_id
-                                                .as_local()
-                                                .is_some_and(|def_id| def_id == param_def_id),
-                                        )
-                                    })
+                                    .any(|def_id| def_id.as_local().is_some_and(|def_id| def_id == param_def_id))
                             {
                                 // `&Cow<'a, T>` when the return type uses 'a is okay
                                 return None;
@@ -527,7 +525,7 @@ fn check_fn_args<'cx, 'tcx: 'cx>(
         })
 }
 
-fn check_mut_from_ref<'tcx>(cx: &LateContext<'tcx>, sig: &FnSig<'_>, body: Option<&'tcx Body<'_>>) {
+fn check_mut_from_ref<'tcx>(cx: &LateContext<'tcx>, sig: &FnSig<'_>, body: Option<&Body<'tcx>>) {
     if let FnRetTy::Return(ty) = sig.decl.output
         && let Some((out, Mutability::Mut, _)) = get_ref_lm(ty)
     {
@@ -543,7 +541,7 @@ fn check_mut_from_ref<'tcx>(cx: &LateContext<'tcx>, sig: &FnSig<'_>, body: Optio
         if let Some(args) = args
             && !args.is_empty()
             && body.map_or(true, |body| {
-                sig.header.unsafety == Unsafety::Unsafe || contains_unsafe_block(cx, body.value)
+                sig.header.safety == Safety::Unsafe || contains_unsafe_block(cx, body.value)
             })
         {
             span_lint_and_then(
@@ -561,7 +559,7 @@ fn check_mut_from_ref<'tcx>(cx: &LateContext<'tcx>, sig: &FnSig<'_>, body: Optio
 }
 
 #[expect(clippy::too_many_lines)]
-fn check_ptr_arg_usage<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Body<'_>, args: &[PtrArg<'tcx>]) -> Vec<PtrArgResult> {
+fn check_ptr_arg_usage<'tcx>(cx: &LateContext<'tcx>, body: &Body<'tcx>, args: &[PtrArg<'tcx>]) -> Vec<PtrArgResult> {
     struct V<'cx, 'tcx> {
         cx: &'cx LateContext<'tcx>,
         /// Map from a local id to which argument it came from (index into `Self::args` and
@@ -606,7 +604,7 @@ fn check_ptr_arg_usage<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Body<'_>, args:
                 Some((Node::Stmt(_), _)) => (),
                 Some((Node::LetStmt(l), _)) => {
                     // Only trace simple bindings. e.g `let x = y;`
-                    if let PatKind::Binding(BindingAnnotation::NONE, id, _, None) = l.pat.kind {
+                    if let PatKind::Binding(BindingMode::NONE, id, _, None) = l.pat.kind {
                         self.bindings.insert(id, args_idx);
                     } else {
                         set_skip_flag();
@@ -687,9 +685,7 @@ fn check_ptr_arg_usage<'tcx>(cx: &LateContext<'tcx>, body: &'tcx Body<'_>, args:
             .filter_map(|(i, arg)| {
                 let param = &body.params[arg.idx];
                 match param.pat.kind {
-                    PatKind::Binding(BindingAnnotation::NONE, id, _, None)
-                        if !is_lint_allowed(cx, PTR_ARG, param.hir_id) =>
-                    {
+                    PatKind::Binding(BindingMode::NONE, id, _, None) if !is_lint_allowed(cx, PTR_ARG, param.hir_id) => {
                         Some((id, i))
                     },
                     _ => {

@@ -1,6 +1,6 @@
 //@ check-pass
 //@ edition:2021
-#![warn(unused_imports)]
+#![warn(redundant_imports)]
 
 use std::convert::TryFrom;//~ WARNING the item `TryFrom` is imported redundantly
 use std::convert::TryInto;//~ WARNING the item `TryInto` is imported redundantly

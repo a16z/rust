@@ -27,13 +27,14 @@ cfg.workspace = true
 hir-def.workspace = true
 hir-expand.workspace = true
 hir-ty.workspace = true
+intern.workspace = true
 stdx.workspace = true
 syntax.workspace = true
 tt.workspace = true
 span.workspace = true
 
 [features]
-in-rust-tree = []
+in-rust-tree = ["hir-expand/in-rust-tree"]
 
 [lints]
 workspace = true

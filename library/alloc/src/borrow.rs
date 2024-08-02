@@ -2,20 +2,19 @@
 
 #![stable(feature = "rust1", since = "1.0.0")]
 
-use core::cmp::Ordering;
-use core::hash::{Hash, Hasher};
-use core::ops::Deref;
-#[cfg(not(no_global_oom_handling))]
-use core::ops::{Add, AddAssign};
-
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::borrow::{Borrow, BorrowMut};
+use core::cmp::Ordering;
+use core::hash::{Hash, Hasher};
+#[cfg(not(no_global_oom_handling))]
+use core::ops::{Add, AddAssign};
+use core::ops::{Deref, DerefPure};
+
+use Cow::*;
 
 use crate::fmt;
 #[cfg(not(no_global_oom_handling))]
 use crate::string::String;
-
-use Cow::*;
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<'a, B: ?Sized> Borrow<B> for Cow<'a, B>
@@ -342,6 +341,9 @@ where
         }
     }
 }
+
+#[unstable(feature = "deref_pure_trait", issue = "87121")]
+unsafe impl<B: ?Sized + ToOwned> DerefPure for Cow<'_, B> where B::Owned: Borrow<B> {}
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<B: ?Sized> Eq for Cow<'_, B> where B: Eq + ToOwned {}

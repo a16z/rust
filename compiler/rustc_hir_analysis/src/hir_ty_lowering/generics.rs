@@ -1,36 +1,38 @@
-use super::IsMethodCall;
-use crate::hir_ty_lowering::{
-    errors::prohibit_assoc_item_binding, ExplicitLateBound, GenericArgCountMismatch,
-    GenericArgCountResult, GenericArgPosition, GenericArgsLowerer,
-};
-use crate::structured_errors::{GenericArgsInfo, StructuredDiag, WrongNumberOfGenericArgs};
 use rustc_ast::ast::ParamKindOrd;
-use rustc_errors::{
-    codes::*, struct_span_code_err, Applicability, Diag, ErrorGuaranteed, MultiSpan,
-};
+use rustc_errors::codes::*;
+use rustc_errors::{struct_span_code_err, Applicability, Diag, ErrorGuaranteed, MultiSpan};
 use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::DefId;
 use rustc_hir::GenericArg;
 use rustc_middle::ty::{
-    self, GenericArgsRef, GenericParamDef, GenericParamDefKind, IsSuggestable, Ty, TyCtxt,
+    self, GenericArgsRef, GenericParamDef, GenericParamDefKind, IsSuggestable, Ty,
 };
 use rustc_session::lint::builtin::LATE_BOUND_LIFETIME_ARGUMENTS;
 use rustc_span::symbol::{kw, sym};
 use smallvec::SmallVec;
 
+use super::{HirTyLowerer, IsMethodCall};
+use crate::errors::wrong_number_of_generic_args::{GenericArgsInfo, WrongNumberOfGenericArgs};
+use crate::hir_ty_lowering::errors::prohibit_assoc_item_constraint;
+use crate::hir_ty_lowering::{
+    ExplicitLateBound, GenericArgCountMismatch, GenericArgCountResult, GenericArgPosition,
+    GenericArgsLowerer,
+};
+
 /// Report an error that a generic argument did not match the generic parameter that was
 /// expected.
 fn generic_arg_mismatch_err(
-    tcx: TyCtxt<'_>,
+    cx: &dyn HirTyLowerer<'_>,
     arg: &GenericArg<'_>,
     param: &GenericParamDef,
     possible_ordering_error: bool,
     help: Option<String>,
 ) -> ErrorGuaranteed {
+    let tcx = cx.tcx();
     let sess = tcx.sess;
     let mut err = struct_span_code_err!(
-        tcx.dcx(),
+        cx.dcx(),
         arg.span(),
         E0747,
         "{} provided when a {} was expected",
@@ -112,8 +114,12 @@ fn generic_arg_mismatch_err(
             }
         }
         (GenericArg::Const(cnst), GenericParamDefKind::Type { .. }) => {
-            let body = tcx.hir().body(cnst.value.body);
-            if let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) = body.value.kind
+            // FIXME(min_generic_const_args): once ConstArgKind::Path is used for non-params too,
+            // this should match against that instead of ::Anon
+            if let hir::ConstArgKind::Anon(anon) = cnst.kind
+                && let body = tcx.hir().body(anon.body)
+                && let rustc_hir::ExprKind::Path(rustc_hir::QPath::Resolved(_, path)) =
+                    body.value.kind
             {
                 if let Res::Def(DefKind::Fn { .. }, id) = path.res {
                     err.help(format!("`{}` is a function item, not a type", tcx.item_name(id)));
@@ -171,7 +177,7 @@ fn generic_arg_mismatch_err(
 /// - `inferred_kind`: if no parameter was provided, and inference
 ///   is enabled, then creates a suitable inference variable.
 pub fn lower_generic_args<'tcx: 'a, 'a>(
-    tcx: TyCtxt<'tcx>,
+    cx: &dyn HirTyLowerer<'tcx>,
     def_id: DefId,
     parent_args: &[ty::GenericArg<'tcx>],
     has_self: bool,
@@ -179,6 +185,7 @@ pub fn lower_generic_args<'tcx: 'a, 'a>(
     arg_count: &GenericArgCountResult,
     ctx: &mut impl GenericArgsLowerer<'a, 'tcx>,
 ) -> GenericArgsRef<'tcx> {
+    let tcx = cx.tcx();
     // Collect the segments of the path; we need to instantiate arguments
     // for parameters throughout the entire path (wherever there are
     // generic parameters).
@@ -196,7 +203,7 @@ pub fn lower_generic_args<'tcx: 'a, 'a>(
     let mut args: SmallVec<[ty::GenericArg<'tcx>; 8]> = SmallVec::with_capacity(count);
     // Iterate over each segment of the path.
     while let Some((def_id, defs)) = stack.pop() {
-        let mut params = defs.params.iter().peekable();
+        let mut params = defs.own_params.iter().peekable();
 
         // If we have already computed the generic arguments for parents,
         // we can use those directly.
@@ -214,10 +221,11 @@ pub fn lower_generic_args<'tcx: 'a, 'a>(
             if let Some(&param) = params.peek() {
                 if param.index == 0 {
                     if let GenericParamDefKind::Type { .. } = param.kind {
+                        assert_eq!(&args[..], &[]);
                         args.push(
                             self_ty
                                 .map(|ty| ty.into())
-                                .unwrap_or_else(|| ctx.inferred_kind(None, param, true)),
+                                .unwrap_or_else(|| ctx.inferred_kind(&args, param, true)),
                         );
                         params.next();
                     }
@@ -228,8 +236,8 @@ pub fn lower_generic_args<'tcx: 'a, 'a>(
         // Check whether this segment takes generic arguments and the user has provided any.
         let (generic_args, infer_args) = ctx.args_for_def_id(def_id);
 
-        let args_iter = generic_args.iter().flat_map(|generic_args| generic_args.args.iter());
-        let mut args_iter = args_iter.clone().peekable();
+        let mut args_iter =
+            generic_args.iter().flat_map(|generic_args| generic_args.args.iter()).peekable();
 
         // If we encounter a type or const when we expect a lifetime, we infer the lifetimes.
         // If we later encounter a lifetime, we know that the arguments were provided in the
@@ -255,6 +263,7 @@ pub fn lower_generic_args<'tcx: 'a, 'a>(
                             | GenericParamDefKind::Lifetime,
                             _,
                         ) => {
+                            // FIXME(effects): this should be removed
                             // SPECIAL CASE FOR DESUGARED EFFECT PARAMS
                             // This comes from the following example:
                             //
@@ -267,7 +276,7 @@ pub fn lower_generic_args<'tcx: 'a, 'a>(
                             // Since this is a const impl, we need to insert a host arg at the end of
                             // `PartialEq`'s generics, but this errors since `Rhs` isn't specified.
                             // To work around this, we infer all arguments until we reach the host param.
-                            args.push(ctx.inferred_kind(Some(&args), param, infer_args));
+                            args.push(ctx.inferred_kind(&args, param, infer_args));
                             params.next();
                         }
                         (GenericArg::Lifetime(_), GenericParamDefKind::Lifetime, _)
@@ -281,7 +290,7 @@ pub fn lower_generic_args<'tcx: 'a, 'a>(
                             GenericParamDefKind::Const { .. },
                             _,
                         ) => {
-                            args.push(ctx.provided_kind(param, arg));
+                            args.push(ctx.provided_kind(&args, param, arg));
                             args_iter.next();
                             params.next();
                         }
@@ -292,7 +301,7 @@ pub fn lower_generic_args<'tcx: 'a, 'a>(
                         ) => {
                             // We expected a lifetime argument, but got a type or const
                             // argument. That means we're inferring the lifetimes.
-                            args.push(ctx.inferred_kind(None, param, infer_args));
+                            args.push(ctx.inferred_kind(&args, param, infer_args));
                             force_infer_lt = Some((arg, param));
                             params.next();
                         }
@@ -312,7 +321,7 @@ pub fn lower_generic_args<'tcx: 'a, 'a>(
                                 // We're going to iterate over the parameters to sort them out, and
                                 // show that order to the user as a possible order for the parameters
                                 let mut param_types_present = defs
-                                    .params
+                                    .own_params
                                     .iter()
                                     .map(|param| (param.kind.to_ord(), param.clone()))
                                     .collect::<Vec<(ParamKindOrd, GenericParamDef)>>();
@@ -324,7 +333,7 @@ pub fn lower_generic_args<'tcx: 'a, 'a>(
                                 param_types_present.dedup();
 
                                 generic_arg_mismatch_err(
-                                    tcx,
+                                    cx,
                                     arg,
                                     param,
                                     !args_iter.clone().is_sorted_by_key(|arg| arg.to_ord()),
@@ -379,7 +388,7 @@ pub fn lower_generic_args<'tcx: 'a, 'a>(
                         assert_eq!(kind, "lifetime");
                         let (provided_arg, param) =
                             force_infer_lt.expect("lifetimes ought to have been inferred");
-                        generic_arg_mismatch_err(tcx, provided_arg, param, false, None);
+                        generic_arg_mismatch_err(cx, provided_arg, param, false, None);
                     }
 
                     break;
@@ -388,7 +397,7 @@ pub fn lower_generic_args<'tcx: 'a, 'a>(
                 (None, Some(&param)) => {
                     // If there are fewer arguments than parameters, it means
                     // we're inferring the remaining arguments.
-                    args.push(ctx.inferred_kind(Some(&args), param, infer_args));
+                    args.push(ctx.inferred_kind(&args, param, infer_args));
                     params.next();
                 }
 
@@ -403,7 +412,7 @@ pub fn lower_generic_args<'tcx: 'a, 'a>(
 /// Checks that the correct number of generic arguments have been provided.
 /// Used specifically for function calls.
 pub fn check_generic_arg_count_for_call(
-    tcx: TyCtxt<'_>,
+    cx: &dyn HirTyLowerer<'_>,
     def_id: DefId,
     generics: &ty::Generics,
     seg: &hir::PathSegment<'_>,
@@ -414,14 +423,14 @@ pub fn check_generic_arg_count_for_call(
         IsMethodCall::No => GenericArgPosition::Value,
     };
     let has_self = generics.parent.is_none() && generics.has_self;
-    check_generic_arg_count(tcx, def_id, seg, generics, gen_pos, has_self)
+    check_generic_arg_count(cx, def_id, seg, generics, gen_pos, has_self)
 }
 
 /// Checks that the correct number of generic arguments have been provided.
 /// This is used both for datatypes and function calls.
-#[instrument(skip(tcx, gen_pos), level = "debug")]
+#[instrument(skip(cx, gen_pos), level = "debug")]
 pub(crate) fn check_generic_arg_count(
-    tcx: TyCtxt<'_>,
+    cx: &dyn HirTyLowerer<'_>,
     def_id: DefId,
     seg: &hir::PathSegment<'_>,
     gen_params: &ty::Generics,
@@ -435,16 +444,16 @@ pub(crate) fn check_generic_arg_count(
     // Subtracting from param count to ensure type params synthesized from `impl Trait`
     // cannot be explicitly specified.
     let synth_type_param_count = gen_params
-        .params
+        .own_params
         .iter()
         .filter(|param| matches!(param.kind, ty::GenericParamDefKind::Type { synthetic: true, .. }))
         .count();
     let named_type_param_count = param_counts.types - has_self as usize - synth_type_param_count;
     let synth_const_param_count = gen_params
-        .params
+        .own_params
         .iter()
         .filter(|param| {
-            matches!(param.kind, ty::GenericParamDefKind::Const { is_host_effect: true, .. })
+            matches!(param.kind, ty::GenericParamDefKind::Const { synthetic: true, .. })
         })
         .count();
     let named_const_param_count = param_counts.consts - synth_const_param_count;
@@ -452,13 +461,13 @@ pub(crate) fn check_generic_arg_count(
         (gen_pos != GenericArgPosition::Type || seg.infer_args) && !gen_args.has_lifetime_params();
 
     if gen_pos != GenericArgPosition::Type
-        && let Some(b) = gen_args.bindings.first()
+        && let Some(c) = gen_args.constraints.first()
     {
-        prohibit_assoc_item_binding(tcx, b.span, None);
+        prohibit_assoc_item_constraint(cx, c, None);
     }
 
     let explicit_late_bound =
-        prohibit_explicit_late_bound_lifetimes(tcx, gen_params, gen_args, gen_pos);
+        prohibit_explicit_late_bound_lifetimes(cx, gen_params, gen_args, gen_pos);
 
     let mut invalid_args = vec![];
 
@@ -474,16 +483,9 @@ pub(crate) fn check_generic_arg_count(
             return Ok(());
         }
 
-        if provided_args > max_expected_args {
-            invalid_args.extend(
-                gen_args.args[max_expected_args..provided_args].iter().map(|arg| arg.span()),
-            );
-        };
+        invalid_args.extend(min_expected_args..provided_args);
 
         let gen_args_info = if provided_args > min_expected_args {
-            invalid_args.extend(
-                gen_args.args[min_expected_args..provided_args].iter().map(|arg| arg.span()),
-            );
             let num_redundant_args = provided_args - min_expected_args;
             GenericArgsInfo::ExcessLifetimes { num_redundant_args }
         } else {
@@ -491,17 +493,15 @@ pub(crate) fn check_generic_arg_count(
             GenericArgsInfo::MissingLifetimes { num_missing_args }
         };
 
-        let reported = WrongNumberOfGenericArgs::new(
-            tcx,
+        let reported = cx.dcx().emit_err(WrongNumberOfGenericArgs::new(
+            cx.tcx(),
             gen_args_info,
             seg,
             gen_params,
             has_self as usize,
             gen_args,
             def_id,
-        )
-        .diagnostic()
-        .emit();
+        ));
 
         Err(reported)
     };
@@ -537,12 +537,9 @@ pub(crate) fn check_generic_arg_count(
 
         let num_default_params = expected_max - expected_min;
 
+        let mut all_params_are_binded = false;
         let gen_args_info = if provided > expected_max {
-            invalid_args.extend(
-                gen_args.args[args_offset + expected_max..args_offset + provided]
-                    .iter()
-                    .map(|arg| arg.span()),
-            );
+            invalid_args.extend((expected_max..provided).map(|i| i + args_offset));
             let num_redundant_args = provided - expected_max;
 
             // Provide extra note if synthetic arguments like `impl Trait` are specified.
@@ -557,6 +554,20 @@ pub(crate) fn check_generic_arg_count(
         } else {
             let num_missing_args = expected_max - provided;
 
+            let constraint_names: Vec<_> =
+                gen_args.constraints.iter().map(|b| b.ident.name).collect();
+            let param_names: Vec<_> = gen_params
+                .own_params
+                .iter()
+                .filter(|param| !has_self || param.index != 0) // Assumes `Self` will always be the first parameter
+                .map(|param| param.name)
+                .collect();
+            if constraint_names == param_names {
+                // We set this to true and delay emitting `WrongNumberOfGenericArgs`
+                // to provide a succinct error for cases like issue #113073
+                all_params_are_binded = true;
+            };
+
             GenericArgsInfo::MissingTypesOrConsts {
                 num_missing_args,
                 num_default_params,
@@ -566,17 +577,19 @@ pub(crate) fn check_generic_arg_count(
 
         debug!(?gen_args_info);
 
-        let reported = WrongNumberOfGenericArgs::new(
-            tcx,
-            gen_args_info,
-            seg,
-            gen_params,
-            params_offset,
-            gen_args,
-            def_id,
-        )
-        .diagnostic()
-        .emit_unless(gen_args.has_err());
+        let reported = gen_args.has_err().unwrap_or_else(|| {
+            cx.dcx()
+                .create_err(WrongNumberOfGenericArgs::new(
+                    cx.tcx(),
+                    gen_args_info,
+                    seg,
+                    gen_params,
+                    params_offset,
+                    gen_args,
+                    def_id,
+                ))
+                .emit_unless(all_params_are_binded)
+        });
 
         Err(reported)
     };
@@ -608,14 +621,14 @@ pub(crate) fn check_generic_arg_count(
         explicit_late_bound,
         correct: lifetimes_correct
             .and(args_correct)
-            .map_err(|reported| GenericArgCountMismatch { reported: Some(reported), invalid_args }),
+            .map_err(|reported| GenericArgCountMismatch { reported, invalid_args }),
     }
 }
 
 /// Prohibits explicit lifetime arguments if late-bound lifetime parameters
 /// are present. This is used both for datatypes and function calls.
 pub(crate) fn prohibit_explicit_late_bound_lifetimes(
-    tcx: TyCtxt<'_>,
+    cx: &dyn HirTyLowerer<'_>,
     def: &ty::Generics,
     args: &hir::GenericArgs<'_>,
     position: GenericArgPosition,
@@ -636,18 +649,19 @@ pub(crate) fn prohibit_explicit_late_bound_lifetimes(
         if position == GenericArgPosition::Value
             && args.num_lifetime_params() != param_counts.lifetimes
         {
-            struct_span_code_err!(tcx.dcx(), span, E0794, "{}", msg)
+            struct_span_code_err!(cx.dcx(), span, E0794, "{}", msg)
                 .with_span_note(span_late, note)
                 .emit();
         } else {
             let mut multispan = MultiSpan::from_span(span);
             multispan.push_span_label(span_late, note);
-            tcx.node_span_lint(
+            cx.tcx().node_span_lint(
                 LATE_BOUND_LIFETIME_ARGUMENTS,
                 args.args[0].hir_id(),
                 multispan,
-                msg,
-                |_| {},
+                |lint| {
+                    lint.primary_message(msg);
+                },
             );
         }
 

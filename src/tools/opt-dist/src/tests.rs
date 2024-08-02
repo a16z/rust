@@ -1,8 +1,9 @@
+use anyhow::Context;
+use camino::{Utf8Path, Utf8PathBuf};
+
 use crate::environment::{executable_extension, Environment};
 use crate::exec::cmd;
 use crate::utils::io::{copy_directory, find_file_in_dir, unpack_archive};
-use anyhow::Context;
-use camino::{Utf8Path, Utf8PathBuf};
 
 /// Run tests on optimized dist artifacts.
 pub fn run_tests(env: &Environment) -> anyhow::Result<()> {
@@ -96,6 +97,7 @@ llvm-config = "{llvm_config}"
         "tests/pretty",
         "tests/run-pass-valgrind",
         "tests/ui",
+        "tests/crashes",
     ];
     for test_path in env.skipped_tests() {
         args.extend(["--skip", test_path]);

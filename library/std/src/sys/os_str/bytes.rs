@@ -3,15 +3,11 @@
 
 use crate::borrow::Cow;
 use crate::collections::TryReserveError;
-use crate::fmt;
 use crate::fmt::Write;
-use crate::mem;
 use crate::rc::Rc;
-use crate::str;
 use crate::sync::Arc;
 use crate::sys_common::{AsInner, IntoInner};
-
-use core::str::Utf8Chunks;
+use crate::{fmt, mem, str};
 
 #[cfg(test)]
 mod tests;
@@ -29,7 +25,7 @@ pub struct Slice {
 
 impl fmt::Debug for Slice {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(&Utf8Chunks::new(&self.inner).debug(), f)
+        fmt::Debug::fmt(&self.inner.utf8_chunks().debug(), f)
     }
 }
 
@@ -41,7 +37,7 @@ impl fmt::Display for Slice {
             return "".fmt(f);
         }
 
-        for chunk in Utf8Chunks::new(&self.inner) {
+        for chunk in self.inner.utf8_chunks() {
             let valid = chunk.valid();
             // If we successfully decoded the whole chunk as a valid string then
             // we can return a direct formatting of the string which will also
@@ -179,6 +175,11 @@ impl Buf {
     }
 
     #[inline]
+    pub fn leak<'a>(self) -> &'a mut Slice {
+        unsafe { mem::transmute(self.inner.leak()) }
+    }
+
+    #[inline]
     pub fn into_box(self) -> Box<Slice> {
         unsafe { mem::transmute(self.inner.into_boxed_slice()) }
     }
@@ -197,6 +198,22 @@ impl Buf {
     #[inline]
     pub fn into_rc(&self) -> Rc<Slice> {
         self.as_slice().into_rc()
+    }
+
+    /// Provides plumbing to core `Vec::truncate`.
+    /// More well behaving alternative to allowing outer types
+    /// full mutable access to the core `Vec`.
+    #[inline]
+    pub(crate) fn truncate(&mut self, len: usize) {
+        self.inner.truncate(len);
+    }
+
+    /// Provides plumbing to core `Vec::extend_from_slice`.
+    /// More well behaving alternative to allowing outer types
+    /// full mutable access to the core `Vec`.
+    #[inline]
+    pub(crate) fn extend_from_slice(&mut self, other: &[u8]) {
+        self.inner.extend_from_slice(other);
     }
 }
 

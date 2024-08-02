@@ -2,7 +2,8 @@
 //@aux-build:proc_macros.rs
 #![allow(clippy::needless_if, unused)]
 #![warn(clippy::manual_is_infinite, clippy::manual_is_finite)]
-#![feature(inline_const)]
+
+// FIXME(f16_f128): add tests for these types once constants are available
 
 #[macro_use]
 extern crate proc_macros;

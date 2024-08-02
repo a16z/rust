@@ -1,15 +1,20 @@
 use rustc_data_structures::graph::dominators::Dominators;
+use rustc_middle::bug;
 use rustc_middle::mir::visit::Visitor;
-use rustc_middle::mir::{self, BasicBlock, Body, Location, NonDivergingIntrinsic, Place, Rvalue};
-use rustc_middle::mir::{BorrowKind, Mutability, Operand};
-use rustc_middle::mir::{InlineAsmOperand, Terminator, TerminatorKind};
-use rustc_middle::mir::{Statement, StatementKind};
+use rustc_middle::mir::{
+    self, BasicBlock, Body, BorrowKind, FakeBorrowKind, InlineAsmOperand, Location, Mutability,
+    NonDivergingIntrinsic, Operand, Place, Rvalue, Statement, StatementKind, Terminator,
+    TerminatorKind,
+};
 use rustc_middle::ty::TyCtxt;
 
+use crate::borrow_set::BorrowSet;
+use crate::facts::AllFacts;
+use crate::location::LocationTable;
+use crate::path_utils::*;
 use crate::{
-    borrow_set::BorrowSet, facts::AllFacts, location::LocationTable, path_utils::*, AccessDepth,
-    Activation, ArtificialField, BorrowIndex, Deep, LocalMutationIsAllowed, Read, ReadKind,
-    ReadOrWrite, Reservation, Shallow, Write, WriteKind,
+    AccessDepth, Activation, ArtificialField, BorrowIndex, Deep, LocalMutationIsAllowed, Read,
+    ReadKind, ReadOrWrite, Reservation, Shallow, Write, WriteKind,
 };
 
 /// Emit `loan_invalidated_at` facts.
@@ -121,6 +126,12 @@ impl<'cx, 'tcx> Visitor<'tcx> for LoanInvalidationsGenerator<'cx, 'tcx> {
                     self.consume_operand(location, &arg.node);
                 }
                 self.mutate_place(location, *destination, Deep);
+            }
+            TerminatorKind::TailCall { func, args, .. } => {
+                self.consume_operand(location, func);
+                for arg in args {
+                    self.consume_operand(location, &arg.node);
+                }
             }
             TerminatorKind::Assert { cond, expected: _, msg, target: _, unwind: _ } => {
                 self.consume_operand(location, cond);
@@ -239,10 +250,12 @@ impl<'cx, 'tcx> LoanInvalidationsGenerator<'cx, 'tcx> {
         match rvalue {
             &Rvalue::Ref(_ /*rgn*/, bk, place) => {
                 let access_kind = match bk {
-                    BorrowKind::Fake => {
+                    BorrowKind::Fake(FakeBorrowKind::Shallow) => {
                         (Shallow(Some(ArtificialField::FakeBorrow)), Read(ReadKind::Borrow(bk)))
                     }
-                    BorrowKind::Shared => (Deep, Read(ReadKind::Borrow(bk))),
+                    BorrowKind::Shared | BorrowKind::Fake(FakeBorrowKind::Deep) => {
+                        (Deep, Read(ReadKind::Borrow(bk)))
+                    }
                     BorrowKind::Mut { .. } => {
                         let wk = WriteKind::MutableBorrow(bk);
                         if allow_two_phase_borrow(bk) {
@@ -297,8 +310,7 @@ impl<'cx, 'tcx> LoanInvalidationsGenerator<'cx, 'tcx> {
                 );
             }
 
-            Rvalue::BinaryOp(_bin_op, box (operand1, operand2))
-            | Rvalue::CheckedBinaryOp(_bin_op, box (operand1, operand2)) => {
+            Rvalue::BinaryOp(_bin_op, box (operand1, operand2)) => {
                 self.consume_operand(location, operand1);
                 self.consume_operand(location, operand2);
             }
@@ -357,8 +369,11 @@ impl<'cx, 'tcx> LoanInvalidationsGenerator<'cx, 'tcx> {
                         // have already taken the reservation
                     }
 
-                    (Read(_), BorrowKind::Fake | BorrowKind::Shared)
-                    | (Read(ReadKind::Borrow(BorrowKind::Fake)), BorrowKind::Mut { .. }) => {
+                    (Read(_), BorrowKind::Fake(_) | BorrowKind::Shared)
+                    | (
+                        Read(ReadKind::Borrow(BorrowKind::Fake(FakeBorrowKind::Shallow))),
+                        BorrowKind::Mut { .. },
+                    ) => {
                         // Reads don't invalidate shared or shallow borrows
                     }
 
@@ -403,7 +418,7 @@ impl<'cx, 'tcx> LoanInvalidationsGenerator<'cx, 'tcx> {
 
             // only mutable borrows should be 2-phase
             assert!(match borrow.kind {
-                BorrowKind::Shared | BorrowKind::Fake => false,
+                BorrowKind::Shared | BorrowKind::Fake(_) => false,
                 BorrowKind::Mut { .. } => true,
             });
 

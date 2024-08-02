@@ -4,12 +4,13 @@
 use std::{
     ffi::OsString,
     fmt, io,
+    marker::PhantomData,
     path::PathBuf,
     process::{ChildStderr, ChildStdout, Command, Stdio},
 };
 
-use command_group::{CommandGroup, GroupChild};
-use crossbeam_channel::{unbounded, Receiver, Sender};
+use crossbeam_channel::Sender;
+use process_wrap::std::{StdChildWrapper, StdCommandWrap};
 use stdx::process::streaming_output;
 
 /// Cargo output is structured as a one JSON per line. This trait abstracts parsing one line of
@@ -84,7 +85,7 @@ impl<T: ParseFromLine> CargoActor<T> {
     }
 }
 
-struct JodGroupChild(GroupChild);
+struct JodGroupChild(Box<dyn StdChildWrapper>);
 
 impl Drop for JodGroupChild {
     fn drop(&mut self) {
@@ -99,10 +100,10 @@ pub(crate) struct CommandHandle<T> {
     /// a read syscall dropping and therefore terminating the process is our best option.
     child: JodGroupChild,
     thread: stdx::thread::JoinHandle<io::Result<(bool, String)>>,
-    pub(crate) receiver: Receiver<T>,
     program: OsString,
     arguments: Vec<OsString>,
     current_dir: Option<PathBuf>,
+    _phantom: PhantomData<T>,
 }
 
 impl<T> fmt::Debug for CommandHandle<T> {
@@ -116,24 +117,29 @@ impl<T> fmt::Debug for CommandHandle<T> {
 }
 
 impl<T: ParseFromLine> CommandHandle<T> {
-    pub(crate) fn spawn(mut command: Command) -> std::io::Result<Self> {
+    pub(crate) fn spawn(mut command: Command, sender: Sender<T>) -> std::io::Result<Self> {
         command.stdout(Stdio::piped()).stderr(Stdio::piped()).stdin(Stdio::null());
-        let mut child = command.group_spawn().map(JodGroupChild)?;
 
         let program = command.get_program().into();
         let arguments = command.get_args().map(|arg| arg.into()).collect::<Vec<OsString>>();
         let current_dir = command.get_current_dir().map(|arg| arg.to_path_buf());
 
-        let stdout = child.0.inner().stdout.take().unwrap();
-        let stderr = child.0.inner().stderr.take().unwrap();
+        let mut child = StdCommandWrap::from(command);
+        #[cfg(unix)]
+        child.wrap(process_wrap::std::ProcessSession);
+        #[cfg(windows)]
+        child.wrap(process_wrap::std::JobObject);
+        let mut child = child.spawn().map(JodGroupChild)?;
 
-        let (sender, receiver) = unbounded();
+        let stdout = child.0.stdout().take().unwrap();
+        let stderr = child.0.stderr().take().unwrap();
+
         let actor = CargoActor::<T>::new(sender, stdout, stderr);
         let thread = stdx::thread::Builder::new(stdx::thread::ThreadIntent::Worker)
             .name("CommandHandle".to_owned())
             .spawn(move || actor.run())
             .expect("failed to spawn thread");
-        Ok(CommandHandle { program, arguments, current_dir, child, thread, receiver })
+        Ok(CommandHandle { program, arguments, current_dir, child, thread, _phantom: PhantomData })
     }
 
     pub(crate) fn cancel(mut self) {

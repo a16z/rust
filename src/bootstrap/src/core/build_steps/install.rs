@@ -3,14 +3,13 @@
 //! This module is responsible for installing the standard library,
 //! compiler, and documentation.
 
-use std::env;
-use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::process::Command;
+use std::{env, fs};
 
 use crate::core::build_steps::dist;
 use crate::core::builder::{Builder, RunConfig, ShouldRun, Step};
 use crate::core::config::{Config, TargetSelection};
+use crate::utils::exec::command;
 use crate::utils::helpers::t;
 use crate::utils::tarball::GeneratedTarball;
 use crate::{Compiler, Kind};
@@ -20,8 +19,8 @@ const SHELL: &str = "bash";
 #[cfg(not(target_os = "illumos"))]
 const SHELL: &str = "sh";
 
-// We have to run a few shell scripts, which choke quite a bit on both `\`
-// characters and on `C:\` paths, so normalize both of them away.
+/// We have to run a few shell scripts, which choke quite a bit on both `\`
+/// characters and on `C:\` paths, so normalize both of them away.
 fn sanitize_sh(path: &Path) -> String {
     let path = path.to_str().unwrap().replace('\\', "/");
     return change_drive(unc_to_lfs(&path)).unwrap_or(path);
@@ -102,7 +101,7 @@ fn install_sh(
     let empty_dir = builder.out.join("tmp/empty_dir");
     t!(fs::create_dir_all(&empty_dir));
 
-    let mut cmd = Command::new(SHELL);
+    let mut cmd = command(SHELL);
     cmd.current_dir(&empty_dir)
         .arg(sanitize_sh(&tarball.decompressed_output().join("install.sh")))
         .arg(format!("--prefix={}", prepare_dir(&destdir_env, prefix)))
@@ -113,7 +112,7 @@ fn install_sh(
         .arg(format!("--libdir={}", prepare_dir(&destdir_env, libdir)))
         .arg(format!("--mandir={}", prepare_dir(&destdir_env, mandir)))
         .arg("--disable-ldconfig");
-    builder.run(&mut cmd);
+    cmd.run(builder);
     t!(fs::remove_dir_all(&empty_dir));
 }
 
@@ -130,7 +129,7 @@ fn prepare_dir(destdir_env: &Option<PathBuf>, mut path: PathBuf) -> String {
     // https://www.gnu.org/prep/standards/html_node/DESTDIR.html
     if let Some(destdir) = destdir_env {
         let without_destdir = path.clone();
-        path = destdir.clone();
+        path.clone_from(destdir);
         // Custom .join() which ignores disk roots.
         for part in without_destdir.components() {
             if let Component::Normal(s) = part {
@@ -265,22 +264,6 @@ install!((self, builder, _config),
             );
         }
     };
-    RustDemangler, alias = "rust-demangler", Self::should_build(_config), only_hosts: true, {
-        // NOTE: Even though `should_build` may return true for `extended` default tools,
-        // dist::RustDemangler may still return None, unless the target-dependent `profiler` config
-        // is also true, or the `tools` array explicitly includes "rust-demangler".
-        if let Some(tarball) = builder.ensure(dist::RustDemangler {
-            compiler: self.compiler,
-            target: self.target
-        }) {
-            install_sh(builder, "rust-demangler", self.compiler.stage, Some(self.target), &tarball);
-        } else {
-            builder.info(
-                &format!("skipping Install RustDemangler stage{} ({})",
-                         self.compiler.stage, self.target),
-            );
-        }
-    };
     Rustc, path = "compiler/rustc", true, only_hosts: true, {
         let tarball = builder.ensure(dist::Rustc {
             compiler: builder.compiler(builder.top_stage, self.target),
@@ -297,6 +280,15 @@ install!((self, builder, _config),
             builder.info(
                 &format!("skipping Install CodegenBackend(\"cranelift\") stage{} ({})",
                          self.compiler.stage, self.target),
+            );
+        }
+    };
+    LlvmBitcodeLinker, alias = "llvm-bitcode-linker", Self::should_build(_config), only_hosts: true, {
+        if let Some(tarball) = builder.ensure(dist::LlvmBitcodeLinker { compiler: self.compiler, target: self.target }) {
+            install_sh(builder, "llvm-bitcode-linker", self.compiler.stage, Some(self.target), &tarball);
+        } else {
+            builder.info(
+                &format!("skipping llvm-bitcode-linker stage{} ({})", self.compiler.stage, self.target),
             );
         }
     };

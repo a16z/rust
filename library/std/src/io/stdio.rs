@@ -3,11 +3,10 @@
 #[cfg(test)]
 mod tests;
 
-use crate::io::prelude::*;
-
 use crate::cell::{Cell, RefCell};
 use crate::fmt;
 use crate::fs::File;
+use crate::io::prelude::*;
 use crate::io::{
     self, BorrowedCursor, BufReader, IoSlice, IoSliceMut, LineWriter, Lines, SpecReadByte,
 };
@@ -15,6 +14,7 @@ use crate::panic::{RefUnwindSafe, UnwindSafe};
 use crate::sync::atomic::{AtomicBool, Ordering};
 use crate::sync::{Arc, Mutex, MutexGuard, OnceLock, ReentrantLock, ReentrantLockGuard};
 use crate::sys::stdio;
+use crate::thread::AccessError;
 
 type LocalStream = Arc<Mutex<Vec<u8>>>;
 
@@ -1064,15 +1064,34 @@ impl fmt::Debug for StderrLock<'_> {
 )]
 #[doc(hidden)]
 pub fn set_output_capture(sink: Option<LocalStream>) -> Option<LocalStream> {
-    if sink.is_none() && !OUTPUT_CAPTURE_USED.load(Ordering::Relaxed) {
-        // OUTPUT_CAPTURE is definitely None since OUTPUT_CAPTURE_USED is false.
-        return None;
-    }
-    OUTPUT_CAPTURE_USED.store(true, Ordering::Relaxed);
-    OUTPUT_CAPTURE.with(move |slot| slot.replace(sink))
+    try_set_output_capture(sink).expect(
+        "cannot access a Thread Local Storage value \
+         during or after destruction",
+    )
 }
 
-/// Write `args` to the capture buffer if enabled and possible, or `global_s`
+/// Tries to set the thread-local output capture buffer and returns the old one.
+/// This may fail once thread-local destructors are called. It's used in panic
+/// handling instead of `set_output_capture`.
+#[unstable(
+    feature = "internal_output_capture",
+    reason = "this function is meant for use in the test crate \
+    and may disappear in the future",
+    issue = "none"
+)]
+#[doc(hidden)]
+pub fn try_set_output_capture(
+    sink: Option<LocalStream>,
+) -> Result<Option<LocalStream>, AccessError> {
+    if sink.is_none() && !OUTPUT_CAPTURE_USED.load(Ordering::Relaxed) {
+        // OUTPUT_CAPTURE is definitely None since OUTPUT_CAPTURE_USED is false.
+        return Ok(None);
+    }
+    OUTPUT_CAPTURE_USED.store(true, Ordering::Relaxed);
+    OUTPUT_CAPTURE.try_with(move |slot| slot.replace(sink))
+}
+
+/// Writes `args` to the capture buffer if enabled and possible, or `global_s`
 /// otherwise. `label` identifies the stream in a panic message.
 ///
 /// This function is used to print error messages, so it takes extra
@@ -1141,7 +1160,40 @@ pub trait IsTerminal: crate::sealed::Sealed {
     /// starting with `msys-` or `cygwin-` and ending in `-pty` will be considered terminals.
     /// Note that this [may change in the future][changes].
     ///
+    /// # Examples
+    ///
+    /// An example of a type for which `IsTerminal` is implemented is [`Stdin`]:
+    ///
+    /// ```no_run
+    /// use std::io::{self, IsTerminal, Write};
+    ///
+    /// fn main() -> io::Result<()> {
+    ///     let stdin = io::stdin();
+    ///
+    ///     // Indicate that the user is prompted for input, if this is a terminal.
+    ///     if stdin.is_terminal() {
+    ///         print!("> ");
+    ///         io::stdout().flush()?;
+    ///     }
+    ///
+    ///     let mut name = String::new();
+    ///     let _ = stdin.read_line(&mut name)?;
+    ///
+    ///     println!("Hello {}", name.trim_end());
+    ///
+    ///     Ok(())
+    /// }
+    /// ```
+    ///
+    /// The example can be run in two ways:
+    ///
+    /// - If you run this example by piping some text to it, e.g. `echo "foo" | path/to/executable`
+    ///   it will print: `Hello foo`.
+    /// - If you instead run the example interactively by running `path/to/executable` directly, it will
+    ///   prompt for input.
+    ///
     /// [changes]: io#platform-specific-behavior
+    /// [`Stdin`]: crate::io::Stdin
     #[stable(feature = "is_terminal", since = "1.70.0")]
     fn is_terminal(&self) -> bool;
 }

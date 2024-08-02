@@ -10,8 +10,8 @@ LL | use std::convert::TryFrom;
 note: the lint level is defined here
   --> $DIR/use-redundant-prelude-rust-2021.rs:3:9
    |
-LL | #![warn(unused_imports)]
-   |         ^^^^^^^^^^^^^^
+LL | #![warn(redundant_imports)]
+   |         ^^^^^^^^^^^^^^^^^
 
 warning: the item `TryInto` is imported redundantly
   --> $DIR/use-redundant-prelude-rust-2021.rs:6:5

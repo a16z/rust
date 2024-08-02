@@ -6,6 +6,7 @@
 //! This is all super highly experimental and not actually intended for
 //! wide/production use yet, it's still all in the experimental category. This
 //! will likely change over time.
+#![forbid(unsafe_op_in_unsafe_fn)]
 
 pub mod alloc;
 #[path = "../unsupported/args.rs"]
@@ -26,15 +27,11 @@ pub mod pipe;
 pub mod process;
 #[path = "../unsupported/stdio.rs"]
 pub mod stdio;
-pub mod thread_local_key;
 #[path = "../unsupported/time.rs"]
 pub mod time;
 
 #[path = "../unsupported/thread.rs"]
 pub mod thread;
-
-#[path = "../unsupported/thread_parking.rs"]
-pub mod thread_parking;
 
 mod abi;
 
@@ -53,10 +50,7 @@ pub fn unsupported<T>() -> std_io::Result<T> {
 }
 
 pub fn unsupported_err() -> std_io::Error {
-    std_io::const_io_error!(
-        std_io::ErrorKind::Unsupported,
-        "operation not supported on this platform",
-    )
+    std_io::Error::UNSUPPORTED_PLATFORM
 }
 
 pub fn is_interrupted(_code: i32) -> bool {

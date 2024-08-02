@@ -31,8 +31,8 @@ pub use self::{
     operators::{ArithOp, BinaryOp, CmpOp, LogicOp, Ordering, RangeOp, UnaryOp},
     token_ext::{CommentKind, CommentPlacement, CommentShape, IsString, QuoteOffsets, Radix},
     traits::{
-        AttrDocCommentIter, DocCommentIter, HasArgList, HasAttrs, HasDocComments, HasGenericParams,
-        HasLoopBody, HasModuleItem, HasName, HasTypeBounds, HasVisibility,
+        AttrDocCommentIter, DocCommentIter, HasArgList, HasAttrs, HasDocComments, HasGenericArgs,
+        HasGenericParams, HasLoopBody, HasModuleItem, HasName, HasTypeBounds, HasVisibility,
     },
 };
 
@@ -149,14 +149,17 @@ pub trait RangeItem {
 mod support {
     use super::{AstChildren, AstNode, SyntaxKind, SyntaxNode, SyntaxToken};
 
+    #[inline]
     pub(super) fn child<N: AstNode>(parent: &SyntaxNode) -> Option<N> {
         parent.children().find_map(N::cast)
     }
 
+    #[inline]
     pub(super) fn children<N: AstNode>(parent: &SyntaxNode) -> AstChildren<N> {
         AstChildren::new(parent)
     }
 
+    #[inline]
     pub(super) fn token(parent: &SyntaxNode, kind: SyntaxKind) -> Option<SyntaxToken> {
         parent.children_with_tokens().filter_map(|it| it.into_token()).find(|it| it.kind() == kind)
     }
@@ -174,6 +177,7 @@ fn test_doc_comment_none() {
         // non-doc
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -189,6 +193,7 @@ fn test_outer_doc_comment_of_items() {
         // non-doc
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -204,6 +209,7 @@ fn test_inner_doc_comment_of_items() {
         // non-doc
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -218,6 +224,7 @@ fn test_doc_comment_of_statics() {
         /// Number of levels
         static LEVELS: i32 = 0;
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -237,6 +244,7 @@ fn test_doc_comment_preserves_indents() {
         /// ```
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -257,6 +265,7 @@ fn test_doc_comment_preserves_newlines() {
         /// foo
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -271,6 +280,7 @@ fn test_doc_comment_single_line_block_strips_suffix() {
         /** this is mod foo*/
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -285,6 +295,7 @@ fn test_doc_comment_single_line_block_strips_suffix_whitespace() {
         /** this is mod foo */
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -303,6 +314,7 @@ fn test_doc_comment_multi_line_block_strips_suffix() {
         */
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -316,7 +328,7 @@ fn test_doc_comment_multi_line_block_strips_suffix() {
 #[test]
 fn test_comments_preserve_trailing_whitespace() {
     let file = SourceFile::parse(
-        "\n/// Representation of a Realm.   \n/// In the specification these are called Realm Records.\nstruct Realm {}",
+        "\n/// Representation of a Realm.   \n/// In the specification these are called Realm Records.\nstruct Realm {}", parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -335,6 +347,7 @@ fn test_four_slash_line_comment() {
         /// doc comment
         mod foo {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();
@@ -360,6 +373,7 @@ where
    for<'a> F: Fn(&'a str)
 {}
         "#,
+        parser::Edition::CURRENT,
     )
     .ok()
     .unwrap();

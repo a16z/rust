@@ -1,27 +1,26 @@
 //! Code for type-checking closure expressions.
 
-use super::{check_fn, CoroutineTypes, Expectation, FnCtxt};
+use std::iter;
+use std::ops::ControlFlow;
 
 use rustc_errors::ErrorGuaranteed;
 use rustc_hir as hir;
 use rustc_hir::lang_items::LangItem;
 use rustc_hir_analysis::hir_ty_lowering::HirTyLowerer;
-use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
-use rustc_infer::infer::{BoundRegionConversionTime, DefineOpaqueTypes};
-use rustc_infer::infer::{InferOk, InferResult};
+use rustc_infer::infer::{BoundRegionConversionTime, DefineOpaqueTypes, InferOk, InferResult};
+use rustc_infer::traits::ObligationCauseCode;
 use rustc_macros::{TypeFoldable, TypeVisitable};
+use rustc_middle::span_bug;
 use rustc_middle::ty::visit::{TypeVisitable, TypeVisitableExt};
-use rustc_middle::ty::GenericArgs;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeSuperVisitable, TypeVisitor};
+use rustc_middle::ty::{self, GenericArgs, Ty, TyCtxt, TypeSuperVisitable, TypeVisitor};
 use rustc_span::def_id::LocalDefId;
 use rustc_span::Span;
 use rustc_target::spec::abi::Abi;
+use rustc_trait_selection::error_reporting::traits::ArgKind;
 use rustc_trait_selection::traits;
-use rustc_trait_selection::traits::error_reporting::ArgKind;
-use rustc_trait_selection::traits::error_reporting::InferCtxtExt as _;
 use rustc_type_ir::ClosureKind;
-use std::iter;
-use std::ops::ControlFlow;
+
+use super::{check_fn, CoroutineTypes, Expectation, FnCtxt};
 
 /// What signature do we *expect* the closure to have from context?
 #[derive(Debug, Clone, TypeFoldable, TypeVisitable)]
@@ -31,6 +30,7 @@ struct ExpectedSig<'tcx> {
     sig: ty::PolyFnSig<'tcx>,
 }
 
+#[derive(Debug)]
 struct ClosureSignatures<'tcx> {
     /// The signature users of the closure see.
     bound_sig: ty::PolyFnSig<'tcx>,
@@ -72,10 +72,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let parent_args =
             GenericArgs::identity_for_item(tcx, tcx.typeck_root_def_id(expr_def_id.to_def_id()));
 
-        let tupled_upvars_ty = self.next_ty_var(TypeVariableOrigin {
-            kind: TypeVariableOriginKind::ClosureSynthetic,
-            span: expr_span,
-        });
+        let tupled_upvars_ty = self.next_ty_var(expr_span);
 
         // FIXME: We could probably actually just unify this further --
         // instead of having a `FnSig` and a `Option<CoroutineTypes>`,
@@ -90,7 +87,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                         [Ty::new_tup(tcx, sig.inputs())],
                         sig.output(),
                         sig.c_variadic,
-                        sig.unsafety,
+                        sig.safety,
                         sig.abi,
                     )
                 });
@@ -102,11 +99,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
                     // Create a type variable (for now) to represent the closure kind.
                     // It will be unified during the upvar inference phase (`upvar.rs`)
-                    None => self.next_ty_var(TypeVariableOrigin {
-                        // FIXME(eddyb) distinguish closure kind inference variables from the rest.
-                        kind: TypeVariableOriginKind::ClosureSynthetic,
-                        span: expr_span,
-                    }),
+                    None => self.next_ty_var(expr_span),
                 };
 
                 let closure_args = ty::ClosureArgs::new(
@@ -125,11 +118,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let yield_ty = match kind {
                     hir::CoroutineKind::Desugared(hir::CoroutineDesugaring::Gen, _)
                     | hir::CoroutineKind::Coroutine(_) => {
-                        let yield_ty = self.next_ty_var(TypeVariableOrigin {
-                            kind: TypeVariableOriginKind::ClosureSynthetic,
-                            span: expr_span,
-                        });
-                        self.require_type_is_sized(yield_ty, expr_span, traits::SizedYieldType);
+                        let yield_ty = self.next_ty_var(expr_span);
+                        self.require_type_is_sized(
+                            yield_ty,
+                            expr_span,
+                            ObligationCauseCode::SizedYieldType,
+                        );
                         yield_ty
                     }
                     // HACK(-Ztrait-solver=next): In the *old* trait solver, we must eagerly
@@ -137,11 +131,12 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     // in this block in projection correctly. In the new trait solver, it is
                     // not a problem.
                     hir::CoroutineKind::Desugared(hir::CoroutineDesugaring::AsyncGen, _) => {
-                        let yield_ty = self.next_ty_var(TypeVariableOrigin {
-                            kind: TypeVariableOriginKind::ClosureSynthetic,
-                            span: expr_span,
-                        });
-                        self.require_type_is_sized(yield_ty, expr_span, traits::SizedYieldType);
+                        let yield_ty = self.next_ty_var(expr_span);
+                        self.require_type_is_sized(
+                            yield_ty,
+                            expr_span,
+                            ObligationCauseCode::SizedYieldType,
+                        );
 
                         Ty::new_adt(
                             tcx,
@@ -166,10 +161,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // Resume type defaults to `()` if the coroutine has no argument.
                 let resume_ty = liberated_sig.inputs().get(0).copied().unwrap_or(tcx.types.unit);
 
-                let interior = self.next_ty_var(TypeVariableOrigin {
-                    kind: TypeVariableOriginKind::ClosureSynthetic,
-                    span: expr_span,
-                });
+                let interior = self.next_ty_var(expr_span);
                 self.deferred_coroutine_interiors.borrow_mut().push((
                     expr_def_id,
                     body.id(),
@@ -181,11 +173,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // later during upvar analysis. Regular coroutines always have the kind
                 // ty of `().`
                 let kind_ty = match kind {
-                    hir::CoroutineKind::Desugared(_, hir::CoroutineSource::Closure) => self
-                        .next_ty_var(TypeVariableOrigin {
-                            kind: TypeVariableOriginKind::ClosureSynthetic,
-                            span: expr_span,
-                        }),
+                    hir::CoroutineKind::Desugared(_, hir::CoroutineSource::Closure) => {
+                        self.next_ty_var(expr_span)
+                    }
                     _ => tcx.types.unit,
                 };
 
@@ -219,30 +209,18 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     }
                 };
                 // Compute all of the variables that will be used to populate the coroutine.
-                let resume_ty = self.next_ty_var(TypeVariableOrigin {
-                    kind: TypeVariableOriginKind::ClosureSynthetic,
-                    span: expr_span,
-                });
-                let interior = self.next_ty_var(TypeVariableOrigin {
-                    kind: TypeVariableOriginKind::ClosureSynthetic,
-                    span: expr_span,
-                });
+                let resume_ty = self.next_ty_var(expr_span);
+                let interior = self.next_ty_var(expr_span);
 
                 let closure_kind_ty = match expected_kind {
                     Some(kind) => Ty::from_closure_kind(tcx, kind),
 
                     // Create a type variable (for now) to represent the closure kind.
                     // It will be unified during the upvar inference phase (`upvar.rs`)
-                    None => self.next_ty_var(TypeVariableOrigin {
-                        kind: TypeVariableOriginKind::ClosureSynthetic,
-                        span: expr_span,
-                    }),
+                    None => self.next_ty_var(expr_span),
                 };
 
-                let coroutine_captures_by_ref_ty = self.next_ty_var(TypeVariableOrigin {
-                    kind: TypeVariableOriginKind::ClosureSynthetic,
-                    span: expr_span,
-                });
+                let coroutine_captures_by_ref_ty = self.next_ty_var(expr_span);
                 let closure_args = ty::CoroutineClosureArgs::new(
                     tcx,
                     ty::CoroutineClosureArgsParts {
@@ -258,7 +236,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                                     ],
                                     Ty::new_tup(tcx, &[bound_yield_ty, bound_return_ty]),
                                     sig.c_variadic,
-                                    sig.unsafety,
+                                    sig.safety,
                                     sig.abi,
                                 )
                             }),
@@ -274,16 +252,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
                     // Create a type variable (for now) to represent the closure kind.
                     // It will be unified during the upvar inference phase (`upvar.rs`)
-                    None => self.next_ty_var(TypeVariableOrigin {
-                        kind: TypeVariableOriginKind::ClosureSynthetic,
-                        span: expr_span,
-                    }),
+                    None => self.next_ty_var(expr_span),
                 };
 
-                let coroutine_upvars_ty = self.next_ty_var(TypeVariableOrigin {
-                    kind: TypeVariableOriginKind::ClosureSynthetic,
-                    span: expr_span,
-                });
+                let coroutine_upvars_ty = self.next_ty_var(expr_span);
 
                 // We need to turn the liberated signature that we got from HIR, which
                 // looks something like `|Args...| -> T`, into a signature that is suitable
@@ -307,7 +279,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     liberated_sig.inputs().iter().copied(),
                     coroutine_output_ty,
                     liberated_sig.c_variadic,
-                    liberated_sig.unsafety,
+                    liberated_sig.safety,
                     liberated_sig.abi,
                 );
 
@@ -360,7 +332,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             ty::Infer(ty::TyVar(vid)) => self.deduce_closure_signature_from_predicates(
                 Ty::new_var(self.tcx, self.root_var(vid)),
                 closure_kind,
-                self.obligations_for_self_ty(vid).map(|obl| (obl.predicate, obl.cause.span)),
+                self.obligations_for_self_ty(vid)
+                    .into_iter()
+                    .map(|obl| (obl.predicate, obl.cause.span)),
             ),
             ty::FnPtr(sig) => match closure_kind {
                 hir::ClosureKind::Closure => {
@@ -439,7 +413,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // many viable options, so pick the most restrictive.
             let trait_def_id = match bound_predicate.skip_binder() {
                 ty::PredicateKind::Clause(ty::ClauseKind::Projection(data)) => {
-                    Some(data.projection_ty.trait_def_id(self.tcx))
+                    Some(data.projection_term.trait_def_id(self.tcx))
                 }
                 ty::PredicateKind::Clause(ty::ClauseKind::Trait(data)) => Some(data.def_id()),
                 _ => None,
@@ -448,9 +422,10 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             if let Some(trait_def_id) = trait_def_id {
                 let found_kind = match closure_kind {
                     hir::ClosureKind::Closure => self.tcx.fn_trait_kind_from_def_id(trait_def_id),
-                    hir::ClosureKind::CoroutineClosure(hir::CoroutineDesugaring::Async) => {
-                        self.tcx.async_fn_trait_kind_from_def_id(trait_def_id)
-                    }
+                    hir::ClosureKind::CoroutineClosure(hir::CoroutineDesugaring::Async) => self
+                        .tcx
+                        .async_fn_trait_kind_from_def_id(trait_def_id)
+                        .or_else(|| self.tcx.fn_trait_kind_from_def_id(trait_def_id)),
                     _ => None,
                 };
 
@@ -494,14 +469,37 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // for closures and async closures, respectively.
         match closure_kind {
             hir::ClosureKind::Closure
-                if self.tcx.fn_trait_kind_from_def_id(trait_def_id).is_some() => {}
+                if self.tcx.fn_trait_kind_from_def_id(trait_def_id).is_some() =>
+            {
+                self.extract_sig_from_projection(cause_span, projection)
+            }
             hir::ClosureKind::CoroutineClosure(hir::CoroutineDesugaring::Async)
-                if self.tcx.async_fn_trait_kind_from_def_id(trait_def_id).is_some() => {}
-            _ => return None,
+                if self.tcx.async_fn_trait_kind_from_def_id(trait_def_id).is_some() =>
+            {
+                self.extract_sig_from_projection(cause_span, projection)
+            }
+            // It's possible we've passed the closure to a (somewhat out-of-fashion)
+            // `F: FnOnce() -> Fut, Fut: Future<Output = T>` style bound. Let's still
+            // guide inference here, since it's beneficial for the user.
+            hir::ClosureKind::CoroutineClosure(hir::CoroutineDesugaring::Async)
+                if self.tcx.fn_trait_kind_from_def_id(trait_def_id).is_some() =>
+            {
+                self.extract_sig_from_projection_and_future_bound(cause_span, projection)
+            }
+            _ => None,
         }
+    }
 
-        let arg_param_ty = projection.skip_binder().projection_ty.args.type_at(1);
-        let arg_param_ty = self.resolve_vars_if_possible(arg_param_ty);
+    /// Given an `FnOnce::Output` or `AsyncFn::Output` projection, extract the args
+    /// and return type to infer a [`ty::PolyFnSig`] for the closure.
+    fn extract_sig_from_projection(
+        &self,
+        cause_span: Option<Span>,
+        projection: ty::PolyProjectionPredicate<'tcx>,
+    ) -> Option<ExpectedSig<'tcx>> {
+        let projection = self.resolve_vars_if_possible(projection);
+
+        let arg_param_ty = projection.skip_binder().projection_term.args.type_at(1);
         debug!(?arg_param_ty);
 
         let ty::Tuple(input_tys) = *arg_param_ty.kind() else {
@@ -509,19 +507,81 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         };
 
         // Since this is a return parameter type it is safe to unwrap.
-        let ret_param_ty = projection.skip_binder().term.ty().unwrap();
-        let ret_param_ty = self.resolve_vars_if_possible(ret_param_ty);
+        let ret_param_ty = projection.skip_binder().term.expect_type();
         debug!(?ret_param_ty);
 
         let sig = projection.rebind(self.tcx.mk_fn_sig(
             input_tys,
             ret_param_ty,
             false,
-            hir::Unsafety::Normal,
+            hir::Safety::Safe,
             Abi::Rust,
         ));
 
         Some(ExpectedSig { cause_span, sig })
+    }
+
+    /// When an async closure is passed to a function that has a "two-part" `Fn`
+    /// and `Future` trait bound, like:
+    ///
+    /// ```rust
+    /// use std::future::Future;
+    ///
+    /// fn not_exactly_an_async_closure<F, Fut>(_f: F)
+    /// where
+    ///     F: FnOnce(String, u32) -> Fut,
+    ///     Fut: Future<Output = i32>,
+    /// {}
+    /// ```
+    ///
+    /// The we want to be able to extract the signature to guide inference in the async
+    /// closure. We will have two projection predicates registered in this case. First,
+    /// we identify the `FnOnce<Args, Output = ?Fut>` bound, and if the output type is
+    /// an inference variable `?Fut`, we check if that is bounded by a `Future<Output = Ty>`
+    /// projection.
+    fn extract_sig_from_projection_and_future_bound(
+        &self,
+        cause_span: Option<Span>,
+        projection: ty::PolyProjectionPredicate<'tcx>,
+    ) -> Option<ExpectedSig<'tcx>> {
+        let projection = self.resolve_vars_if_possible(projection);
+
+        let arg_param_ty = projection.skip_binder().projection_term.args.type_at(1);
+        debug!(?arg_param_ty);
+
+        let ty::Tuple(input_tys) = *arg_param_ty.kind() else {
+            return None;
+        };
+
+        // If the return type is a type variable, look for bounds on it.
+        // We could theoretically support other kinds of return types here,
+        // but none of them would be useful, since async closures return
+        // concrete anonymous future types, and their futures are not coerced
+        // into any other type within the body of the async closure.
+        let ty::Infer(ty::TyVar(return_vid)) = *projection.skip_binder().term.expect_type().kind()
+        else {
+            return None;
+        };
+
+        // FIXME: We may want to elaborate here, though I assume this will be exceedingly rare.
+        for bound in self.obligations_for_self_ty(return_vid) {
+            if let Some(ret_projection) = bound.predicate.as_projection_clause()
+                && let Some(ret_projection) = ret_projection.no_bound_vars()
+                && self.tcx.is_lang_item(ret_projection.def_id(), LangItem::FutureOutput)
+            {
+                let sig = projection.rebind(self.tcx.mk_fn_sig(
+                    input_tys,
+                    ret_projection.term.expect_type(),
+                    false,
+                    hir::Safety::Safe,
+                    Abi::Rust,
+                ));
+
+                return Some(ExpectedSig { cause_span, sig });
+            }
+        }
+
+        None
     }
 
     fn sig_of_closure(
@@ -629,7 +689,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 sig.inputs().iter().cloned(),
                 sig.output(),
                 sig.c_variadic,
-                hir::Unsafety::Normal,
+                hir::Safety::Safe,
                 Abi::RustCall,
             )
         });
@@ -672,13 +732,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             .map(|ty| ArgKind::from_expected_ty(*ty, None))
             .collect();
         let (closure_span, closure_arg_span, found_args) =
-            match self.get_fn_like_arguments(expr_map_node) {
+            match self.err_ctxt().get_fn_like_arguments(expr_map_node) {
                 Some((sp, arg_sp, args)) => (Some(sp), arg_sp, args),
                 None => (None, None, Vec::new()),
             };
         let expected_span =
             expected_sig.cause_span.unwrap_or_else(|| self.tcx.def_span(expr_def_id));
         let guar = self
+            .err_ctxt()
             .report_arg_count_mismatch(
                 expected_span,
                 closure_span,
@@ -729,25 +790,16 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // [c2]: https://github.com/rust-lang/rust/pull/45072#issuecomment-341096796
         self.commit_if_ok(|_| {
             let mut all_obligations = vec![];
-            let inputs: Vec<_> = iter::zip(
-                decl.inputs,
-                supplied_sig.inputs().skip_binder(), // binder moved to (*) below
-            )
-            .map(|(hir_ty, &supplied_ty)| {
-                // Instantiate (this part of..) S to S', i.e., with fresh variables.
-                self.instantiate_binder_with_fresh_vars(
-                    hir_ty.span,
-                    BoundRegionConversionTime::FnCall,
-                    // (*) binder moved to here
-                    supplied_sig.inputs().rebind(supplied_ty),
-                )
-            })
-            .collect();
+            let supplied_sig = self.instantiate_binder_with_fresh_vars(
+                self.tcx.def_span(expr_def_id),
+                BoundRegionConversionTime::FnCall,
+                supplied_sig,
+            );
 
             // The liberated version of this signature should be a subtype
             // of the liberated form of the expectation.
             for ((hir_ty, &supplied_ty), expected_ty) in iter::zip(
-                iter::zip(decl.inputs, &inputs),
+                iter::zip(decl.inputs, supplied_sig.inputs()),
                 expected_sigs.liberated_sig.inputs(), // `liberated_sig` is E'.
             ) {
                 // Check that E' = S'.
@@ -760,11 +812,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 all_obligations.extend(obligations);
             }
 
-            let supplied_output_ty = self.instantiate_binder_with_fresh_vars(
-                decl.output.span(),
-                BoundRegionConversionTime::FnCall,
-                supplied_sig.output(),
-            );
+            let supplied_output_ty = supplied_sig.output();
             let cause = &self.misc(decl.output.span());
             let InferOk { value: (), obligations } = self.at(cause, self.param_env).eq(
                 DefineOpaqueTypes::Yes,
@@ -773,13 +821,14 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             )?;
             all_obligations.extend(obligations);
 
-            let inputs = inputs.into_iter().map(|ty| self.resolve_vars_if_possible(ty));
+            let inputs =
+                supplied_sig.inputs().into_iter().map(|&ty| self.resolve_vars_if_possible(ty));
 
             expected_sigs.liberated_sig = self.tcx.mk_fn_sig(
                 inputs,
                 supplied_output_ty,
                 expected_sigs.liberated_sig.c_variadic,
-                hir::Unsafety::Normal,
+                hir::Safety::Safe,
                 Abi::RustCall,
             );
 
@@ -856,7 +905,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 supplied_arguments,
                 supplied_return,
                 decl.c_variadic,
-                hir::Unsafety::Normal,
+                hir::Safety::Safe,
                 Abi::RustCall,
             ),
             bound_vars,
@@ -907,7 +956,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let output_ty = match *ret_ty.kind() {
             ty::Infer(ty::TyVar(ret_vid)) => {
-                self.obligations_for_self_ty(ret_vid).find_map(|obligation| {
+                self.obligations_for_self_ty(ret_vid).into_iter().find_map(|obligation| {
                     get_future_output(obligation.predicate, obligation.cause.span)
                 })?
             }
@@ -967,7 +1016,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         };
 
         // Check that this is a projection from the `Future` trait.
-        let trait_def_id = predicate.projection_ty.trait_def_id(self.tcx);
+        let trait_def_id = predicate.projection_term.trait_def_id(self.tcx);
         let future_trait = self.tcx.require_lang_item(LangItem::Future, Some(cause_span));
         if trait_def_id != future_trait {
             debug!("deduce_future_output_from_projection: not a future");
@@ -977,11 +1026,11 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         // The `Future` trait has only one associated item, `Output`,
         // so check that this is what we see.
         let output_assoc_item = self.tcx.associated_item_def_ids(future_trait)[0];
-        if output_assoc_item != predicate.projection_ty.def_id {
+        if output_assoc_item != predicate.projection_term.def_id {
             span_bug!(
                 cause_span,
                 "projecting associated item `{:?}` from future, which is not Output `{:?}`",
-                predicate.projection_ty.def_id,
+                predicate.projection_term.def_id,
                 output_assoc_item,
             );
         }
@@ -992,7 +1041,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let output_ty = self.resolve_vars_if_possible(predicate.term);
         debug!("deduce_future_output_from_projection: output_ty={:?}", output_ty);
         // This is a projection on a Fn trait so will always be a type.
-        Some(output_ty.ty().unwrap())
+        Some(output_ty.expect_type())
     }
 
     /// Converts the types that the user supplied, in case that doing
@@ -1020,7 +1069,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             supplied_arguments,
             err_ty,
             decl.c_variadic,
-            hir::Unsafety::Normal,
+            hir::Safety::Safe,
             Abi::RustCall,
         ));
 
@@ -1029,6 +1078,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         result
     }
 
+    #[instrument(level = "debug", skip(self), ret)]
     fn closure_sigs(
         &self,
         expr_def_id: LocalDefId,

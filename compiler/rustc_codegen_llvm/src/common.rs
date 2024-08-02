@@ -1,11 +1,8 @@
 //! Code that is useful in various codegen modules.
 
-use crate::consts::const_alloc_to_llvm;
-pub use crate::context::CodegenCx;
-use crate::llvm::{self, BasicBlock, Bool, ConstantInt, False, OperandBundleDef, True};
-use crate::type_::Type;
-use crate::value::Value;
+use std::fmt::Write;
 
+use libc::{c_char, c_uint};
 use rustc_ast::Mutability;
 use rustc_codegen_ssa::traits::*;
 use rustc_data_structures::stable_hasher::{Hash128, HashStable, StableHasher};
@@ -16,9 +13,13 @@ use rustc_middle::ty::TyCtxt;
 use rustc_session::cstore::{DllCallingConvention, DllImport, PeImportNameType};
 use rustc_target::abi::{self, AddressSpace, HasDataLayout, Pointer};
 use rustc_target::spec::Target;
+use tracing::debug;
 
-use libc::{c_char, c_uint};
-use std::fmt::Write;
+use crate::consts::const_alloc_to_llvm;
+pub use crate::context::CodegenCx;
+use crate::llvm::{self, BasicBlock, Bool, ConstantInt, False, OperandBundleDef, True};
+use crate::type_::Type;
+use crate::value::Value;
 
 /*
 * A note on nomenclature of linking: "extern", "foreign", and "upcall".
@@ -243,7 +244,7 @@ impl<'ll, 'tcx> ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
         let bitsize = if layout.is_bool() { 1 } else { layout.size(self).bits() };
         match cv {
             Scalar::Int(int) => {
-                let data = int.assert_bits(layout.size(self));
+                let data = int.to_bits(layout.size(self));
                 let llval = self.const_uint_big(self.type_ix(bitsize), data);
                 if matches!(layout.primitive(), Pointer(_)) {
                     unsafe { llvm::LLVMConstIntToPtr(llval, llty) }
@@ -255,24 +256,41 @@ impl<'ll, 'tcx> ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                 let (prov, offset) = ptr.into_parts();
                 let (base_addr, base_addr_space) = match self.tcx.global_alloc(prov.alloc_id()) {
                     GlobalAlloc::Memory(alloc) => {
-                        let init = const_alloc_to_llvm(self, alloc);
-                        let alloc = alloc.inner();
-                        let value = match alloc.mutability {
-                            Mutability::Mut => self.static_addr_of_mut(init, alloc.align, None),
-                            _ => self.static_addr_of(init, alloc.align, None),
-                        };
-                        if !self.sess().fewer_names() && llvm::get_value_name(value).is_empty() {
-                            let hash = self.tcx.with_stable_hashing_context(|mut hcx| {
-                                let mut hasher = StableHasher::new();
-                                alloc.hash_stable(&mut hcx, &mut hasher);
-                                hasher.finish::<Hash128>()
-                            });
-                            llvm::set_value_name(value, format!("alloc_{hash:032x}").as_bytes());
+                        // For ZSTs directly codegen an aligned pointer.
+                        // This avoids generating a zero-sized constant value and actually needing a
+                        // real address at runtime.
+                        if alloc.inner().len() == 0 {
+                            assert_eq!(offset.bytes(), 0);
+                            let llval = self.const_usize(alloc.inner().align.bytes());
+                            return if matches!(layout.primitive(), Pointer(_)) {
+                                unsafe { llvm::LLVMConstIntToPtr(llval, llty) }
+                            } else {
+                                self.const_bitcast(llval, llty)
+                            };
+                        } else {
+                            let init = const_alloc_to_llvm(self, alloc, /*static*/ false);
+                            let alloc = alloc.inner();
+                            let value = match alloc.mutability {
+                                Mutability::Mut => self.static_addr_of_mut(init, alloc.align, None),
+                                _ => self.static_addr_of(init, alloc.align, None),
+                            };
+                            if !self.sess().fewer_names() && llvm::get_value_name(value).is_empty()
+                            {
+                                let hash = self.tcx.with_stable_hashing_context(|mut hcx| {
+                                    let mut hasher = StableHasher::new();
+                                    alloc.hash_stable(&mut hcx, &mut hasher);
+                                    hasher.finish::<Hash128>()
+                                });
+                                llvm::set_value_name(
+                                    value,
+                                    format!("alloc_{hash:032x}").as_bytes(),
+                                );
+                            }
+                            (value, AddressSpace::DATA)
                         }
-                        (value, AddressSpace::DATA)
                     }
-                    GlobalAlloc::Function(fn_instance) => (
-                        self.get_fn_addr(fn_instance.polymorphize(self.tcx)),
+                    GlobalAlloc::Function { instance, .. } => (
+                        self.get_fn_addr(instance.polymorphize(self.tcx)),
                         self.data_layout().instruction_address_space,
                     ),
                     GlobalAlloc::VTable(ty, trait_ref) => {
@@ -280,7 +298,7 @@ impl<'ll, 'tcx> ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
                             .tcx
                             .global_alloc(self.tcx.vtable_allocation((ty, trait_ref)))
                             .unwrap_memory();
-                        let init = const_alloc_to_llvm(self, alloc);
+                        let init = const_alloc_to_llvm(self, alloc, /*static*/ false);
                         let value = self.static_addr_of(init, alloc.inner().align, None);
                         (value, AddressSpace::DATA)
                     }
@@ -308,11 +326,7 @@ impl<'ll, 'tcx> ConstMethods<'tcx> for CodegenCx<'ll, 'tcx> {
     }
 
     fn const_data_from_alloc(&self, alloc: ConstAllocation<'tcx>) -> Self::Value {
-        const_alloc_to_llvm(self, alloc)
-    }
-
-    fn const_bitcast(&self, val: &'ll Value, ty: &'ll Type) -> &'ll Value {
-        self.const_bitcast(val, ty)
+        const_alloc_to_llvm(self, alloc, /*static*/ false)
     }
 
     fn const_ptr_byte_offset(&self, base_addr: Self::Value, offset: abi::Size) -> Self::Value {

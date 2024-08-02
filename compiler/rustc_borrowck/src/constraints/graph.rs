@@ -4,11 +4,8 @@ use rustc_middle::mir::ConstraintCategory;
 use rustc_middle::ty::{RegionVid, VarianceDiagInfo};
 use rustc_span::DUMMY_SP;
 
-use crate::{
-    constraints::OutlivesConstraintIndex,
-    constraints::{OutlivesConstraint, OutlivesConstraintSet},
-    type_check::Locations,
-};
+use crate::constraints::{OutlivesConstraint, OutlivesConstraintIndex, OutlivesConstraintSet};
+use crate::type_check::Locations;
 
 /// The construct graph organizes the constraints by their end-points.
 /// It can be used to view a `R1: R2` constraint as either an edge `R1
@@ -216,23 +213,14 @@ impl<'s, 'tcx, D: ConstraintGraphDirection> Iterator for Successors<'s, 'tcx, D>
 
 impl<'s, 'tcx, D: ConstraintGraphDirection> graph::DirectedGraph for RegionGraph<'s, 'tcx, D> {
     type Node = RegionVid;
-}
 
-impl<'s, 'tcx, D: ConstraintGraphDirection> graph::WithNumNodes for RegionGraph<'s, 'tcx, D> {
     fn num_nodes(&self) -> usize {
         self.constraint_graph.first_constraints.len()
     }
 }
 
-impl<'s, 'tcx, D: ConstraintGraphDirection> graph::WithSuccessors for RegionGraph<'s, 'tcx, D> {
-    fn successors(&self, node: Self::Node) -> <Self as graph::GraphSuccessors<'_>>::Iter {
+impl<'s, 'tcx, D: ConstraintGraphDirection> graph::Successors for RegionGraph<'s, 'tcx, D> {
+    fn successors(&self, node: Self::Node) -> impl Iterator<Item = Self::Node> {
         self.outgoing_regions(node)
     }
-}
-
-impl<'s, 'tcx, D: ConstraintGraphDirection> graph::GraphSuccessors<'_>
-    for RegionGraph<'s, 'tcx, D>
-{
-    type Item = RegionVid;
-    type Iter = Successors<'s, 'tcx, D>;
 }

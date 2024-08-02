@@ -9,7 +9,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for imports ending in `::{self}`.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// In most cases, this can be written much more cleanly by omitting `::{self}`.
     ///
     /// ### Known problems
@@ -36,8 +36,8 @@ declare_lint_pass!(UnnecessarySelfImports => [UNNECESSARY_SELF_IMPORTS]);
 impl EarlyLintPass for UnnecessarySelfImports {
     fn check_item(&mut self, cx: &EarlyContext<'_>, item: &Item) {
         if let ItemKind::Use(use_tree) = &item.kind
-            && let UseTreeKind::Nested(nodes) = &use_tree.kind
-            && let [(self_tree, _)] = &**nodes
+            && let UseTreeKind::Nested { items, .. } = &use_tree.kind
+            && let [(self_tree, _)] = &**items
             && let [self_seg] = &*self_tree.prefix.segments
             && self_seg.ident.name == kw::SelfLower
             && let Some(last_segment) = use_tree.prefix.segments.last()

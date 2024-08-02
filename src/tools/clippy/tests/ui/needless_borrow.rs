@@ -1,4 +1,3 @@
-#![feature(lint_reasons)]
 #![allow(
     unused,
     non_local_definitions,
@@ -250,4 +249,12 @@ mod issue_10253 {
     fn f() {
         (&S).f::<()>();
     }
+}
+
+fn issue_12268() {
+    let option = Some((&1,));
+    let x = (&1,);
+    option.unwrap_or((&x.0,));
+    //~^ ERROR: this expression creates a reference which is immediately dereferenced by the
+    // compiler
 }

@@ -3,12 +3,12 @@ use clippy_utils::consts::{constant, Constant};
 use clippy_utils::diagnostics::{span_lint_and_sugg, span_lint_and_then};
 use clippy_utils::source::snippet_with_context;
 use clippy_utils::usage::local_used_after_expr;
-use clippy_utils::visitors::{for_each_expr_with_closures, Descend};
+use clippy_utils::visitors::{for_each_expr, Descend};
 use clippy_utils::{is_diag_item_method, match_def_path, path_to_local_id, paths};
 use core::ops::ControlFlow;
 use rustc_errors::Applicability;
 use rustc_hir::{
-    BindingAnnotation, Expr, ExprKind, HirId, LangItem, LetStmt, MatchSource, Node, Pat, PatKind, QPath, Stmt, StmtKind,
+    BindingMode, Expr, ExprKind, HirId, LangItem, LetStmt, MatchSource, Node, Pat, PatKind, QPath, Stmt, StmtKind,
 };
 use rustc_lint::LateContext;
 use rustc_middle::ty;
@@ -129,7 +129,7 @@ fn check_manual_split_once_indirect(
     let ctxt = expr.span.ctxt();
     let mut parents = cx.tcx.hir().parent_iter(expr.hir_id);
     if let (_, Node::LetStmt(local)) = parents.next()?
-        && let PatKind::Binding(BindingAnnotation::MUT, iter_binding_id, iter_ident, None) = local.pat.kind
+        && let PatKind::Binding(BindingMode::MUT, iter_binding_id, iter_ident, None) = local.pat.kind
         && let (iter_stmt_id, Node::Stmt(_)) = parents.next()?
         && let (_, Node::Block(enclosing_block)) = parents.next()?
         && let mut stmts = enclosing_block
@@ -200,7 +200,7 @@ fn indirect_usage<'tcx>(
 ) -> Option<IndirectUsage<'tcx>> {
     if let StmtKind::Let(&LetStmt {
         pat: Pat {
-            kind: PatKind::Binding(BindingAnnotation::NONE, _, ident, None),
+            kind: PatKind::Binding(BindingMode::NONE, _, ident, None),
             ..
         },
         init: Some(init_expr),
@@ -209,7 +209,7 @@ fn indirect_usage<'tcx>(
     }) = stmt.kind
     {
         let mut path_to_binding = None;
-        let _: Option<!> = for_each_expr_with_closures(cx, init_expr, |e| {
+        let _: Option<!> = for_each_expr(cx, init_expr, |e| {
             if path_to_local_id(e, binding) {
                 path_to_binding = Some(e);
             }

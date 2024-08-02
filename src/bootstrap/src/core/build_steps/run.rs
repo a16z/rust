@@ -1,40 +1,18 @@
+//! Build-and-run steps for in-repo tools
+//!
+//! A bit of a hodge-podge as e.g. if a tool's a test fixture it should be in `build_steps::test`.
+//! If it can be reached from `./x.py run` it can go here.
+
 use std::path::PathBuf;
-use std::process::Command;
 
 use crate::core::build_steps::dist::distdir;
 use crate::core::build_steps::test;
 use crate::core::build_steps::tool::{self, SourceType, Tool};
-use crate::core::builder::{Builder, RunConfig, ShouldRun, Step};
+use crate::core::builder::{Builder, Kind, RunConfig, ShouldRun, Step};
 use crate::core::config::flags::get_completion;
 use crate::core::config::TargetSelection;
-use crate::utils::helpers::output;
+use crate::utils::exec::command;
 use crate::Mode;
-
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ExpandYamlAnchors;
-
-impl Step for ExpandYamlAnchors {
-    type Output = ();
-
-    /// Runs the `expand-yaml_anchors` tool.
-    ///
-    /// This tool in `src/tools` reads the CI configuration files written in YAML and expands the
-    /// anchors in them, since GitHub Actions doesn't support them.
-    fn run(self, builder: &Builder<'_>) {
-        builder.info("Expanding YAML anchors in the GitHub Actions configuration");
-        builder.run_delaying_failure(
-            builder.tool_cmd(Tool::ExpandYamlAnchors).arg("generate").arg(&builder.src),
-        );
-    }
-
-    fn should_run(run: ShouldRun<'_>) -> ShouldRun<'_> {
-        run.path("src/tools/expand-yaml-anchors")
-    }
-
-    fn make_run(run: RunConfig<'_>) {
-        run.builder.ensure(ExpandYamlAnchors);
-    }
-}
 
 #[derive(Debug, PartialOrd, Ord, Clone, Hash, PartialEq, Eq)]
 pub struct BuildManifest;
@@ -62,7 +40,7 @@ impl Step for BuildManifest {
             panic!("\n\nfailed to specify `dist.upload-addr` in `config.toml`\n\n")
         });
 
-        let today = output(Command::new("date").arg("+%Y-%m-%d"));
+        let today = command("date").arg("+%Y-%m-%d").run_capture_stdout(builder).stdout();
 
         cmd.arg(sign);
         cmd.arg(distdir(builder));
@@ -71,7 +49,7 @@ impl Step for BuildManifest {
         cmd.arg(&builder.config.channel);
 
         builder.create_dir(&distdir(builder));
-        builder.run(&mut cmd);
+        cmd.run(builder);
     }
 }
 
@@ -93,7 +71,7 @@ impl Step for BumpStage0 {
     fn run(self, builder: &Builder<'_>) -> Self::Output {
         let mut cmd = builder.tool_cmd(Tool::BumpStage0);
         cmd.args(builder.config.args());
-        builder.run(&mut cmd);
+        cmd.run(builder);
     }
 }
 
@@ -115,7 +93,7 @@ impl Step for ReplaceVersionPlaceholder {
     fn run(self, builder: &Builder<'_>) -> Self::Output {
         let mut cmd = builder.tool_cmd(Tool::ReplaceVersionPlaceholder);
         cmd.arg(&builder.src);
-        builder.run(&mut cmd);
+        cmd.run(builder);
     }
 }
 
@@ -164,21 +142,22 @@ impl Step for Miri {
             host_compiler,
             Mode::ToolRustc,
             host,
-            "run",
+            Kind::Run,
             "src/tools/miri",
             SourceType::InTree,
             &[],
         );
         miri.add_rustc_lib_path(builder);
-        // Forward arguments.
         miri.arg("--").arg("--target").arg(target.rustc_target_arg());
-        miri.args(builder.config.args());
 
         // miri tests need to know about the stage sysroot
-        miri.env("MIRI_SYSROOT", &miri_sysroot);
+        miri.arg("--sysroot").arg(miri_sysroot);
 
-        let mut miri = Command::from(miri);
-        builder.run(&mut miri);
+        // Forward arguments. This may contain further arguments to the program
+        // after another --, so this must be at the end.
+        miri.args(builder.config.args());
+
+        miri.into_cmd().run(builder);
     }
 }
 
@@ -208,7 +187,7 @@ impl Step for CollectLicenseMetadata {
         let mut cmd = builder.tool_cmd(Tool::CollectLicenseMetadata);
         cmd.env("REUSE_EXE", reuse);
         cmd.env("DEST", &dest);
-        builder.run(&mut cmd);
+        cmd.run(builder);
 
         dest
     }
@@ -238,7 +217,7 @@ impl Step for GenerateCopyright {
         let mut cmd = builder.tool_cmd(Tool::GenerateCopyright);
         cmd.env("LICENSE_METADATA", &license_metadata);
         cmd.env("DEST", &dest);
-        builder.run(&mut cmd);
+        cmd.run(builder);
 
         dest
     }
@@ -262,7 +241,7 @@ impl Step for GenerateWindowsSys {
     fn run(self, builder: &Builder<'_>) {
         let mut cmd = builder.tool_cmd(Tool::GenerateWindowsSys);
         cmd.arg(&builder.src);
-        builder.run(&mut cmd);
+        cmd.run(builder);
     }
 }
 

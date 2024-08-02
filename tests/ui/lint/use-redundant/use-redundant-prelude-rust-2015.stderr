@@ -10,8 +10,8 @@ LL | use std::option::Option::Some;
 note: the lint level is defined here
   --> $DIR/use-redundant-prelude-rust-2015.rs:2:9
    |
-LL | #![warn(unused_imports)]
-   |         ^^^^^^^^^^^^^^
+LL | #![warn(redundant_imports)]
+   |         ^^^^^^^^^^^^^^^^^
 
 warning: the item `None` is imported redundantly
   --> $DIR/use-redundant-prelude-rust-2015.rs:6:5

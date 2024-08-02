@@ -11,10 +11,7 @@ mod repr_unpacked;
 #[cfg(any(not(target_pointer_width = "64"), target_os = "uefi"))]
 use repr_unpacked::Repr;
 
-use crate::error;
-use crate::fmt;
-use crate::result;
-use crate::sys;
+use crate::{error, fmt, result, sys};
 
 /// A specialized [`Result`] type for I/O operations.
 ///
@@ -73,6 +70,30 @@ impl fmt::Debug for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         fmt::Debug::fmt(&self.repr, f)
     }
+}
+
+/// Common errors constants for use in std
+#[allow(dead_code)]
+impl Error {
+    pub(crate) const INVALID_UTF8: Self =
+        const_io_error!(ErrorKind::InvalidData, "stream did not contain valid UTF-8");
+
+    pub(crate) const READ_EXACT_EOF: Self =
+        const_io_error!(ErrorKind::UnexpectedEof, "failed to fill whole buffer");
+
+    pub(crate) const UNKNOWN_THREAD_COUNT: Self = const_io_error!(
+        ErrorKind::NotFound,
+        "The number of hardware threads is not known for the target platform"
+    );
+
+    pub(crate) const UNSUPPORTED_PLATFORM: Self =
+        const_io_error!(ErrorKind::Unsupported, "operation not supported on this platform");
+
+    pub(crate) const WRITE_ALL_EOF: Self =
+        const_io_error!(ErrorKind::WriteZero, "failed to write whole buffer");
+
+    pub(crate) const ZERO_TIMEOUT: Self =
+        const_io_error!(ErrorKind::InvalidInput, "cannot set a 0 duration timeout");
 }
 
 #[stable(feature = "rust1", since = "1.0.0")]
@@ -143,7 +164,7 @@ impl SimpleMessage {
     }
 }
 
-/// Create and return an `io::Error` for a given `ErrorKind` and constant
+/// Creates and returns an `io::Error` for a given `ErrorKind` and constant
 /// message. This doesn't allocate.
 pub(crate) macro const_io_error($kind:expr, $message:expr $(,)?) {
     $crate::io::error::Error::from_static_message({
@@ -751,7 +772,7 @@ impl Error {
     ///
     /// impl Display for MyError {
     ///     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    ///         write!(f, "MyError: {}", &self.v)
+    ///         write!(f, "MyError: {}", self.v)
     ///     }
     /// }
     ///
@@ -828,21 +849,23 @@ impl Error {
         }
     }
 
-    /// Attempt to downcast the inner error to `E` if any.
+    /// Attempts to downcast the custom boxed error to `E`.
     ///
-    /// If this [`Error`] was constructed via [`new`] then this function will
-    /// attempt to perform downgrade on it, otherwise it will return [`Err`].
+    /// If this [`Error`] contains a custom boxed error,
+    /// then it would attempt downcasting on the boxed error,
+    /// otherwise it will return [`Err`].
     ///
-    /// If the downcast succeeds, it will return [`Ok`], otherwise it will also
-    /// return [`Err`].
+    /// If the custom boxed error has the same type as `E`, it will return [`Ok`],
+    /// otherwise it will also return [`Err`].
     ///
-    /// [`new`]: Error::new
+    /// This method is meant to be a convenience routine for calling
+    /// `Box<dyn Error + Sync + Send>::downcast` on the custom boxed error, returned by
+    /// [`Error::into_inner`].
+    ///
     ///
     /// # Examples
     ///
     /// ```
-    /// #![feature(io_error_downcast)]
-    ///
     /// use std::fmt;
     /// use std::io;
     /// use std::error::Error;
@@ -895,7 +918,7 @@ impl Error {
     /// assert!(io_error.raw_os_error().is_none());
     /// # }
     /// ```
-    #[unstable(feature = "io_error_downcast", issue = "99262")]
+    #[stable(feature = "io_error_downcast", since = "1.79.0")]
     pub fn downcast<E>(self) -> result::Result<E, Self>
     where
         E: error::Error + Send + Sync + 'static,

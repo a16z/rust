@@ -3,14 +3,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-use crate::build_sysroot;
-use crate::config;
 use crate::path::{Dirs, RelPath};
 use crate::prepare::{apply_patches, GitRepo};
 use crate::rustc_info::get_default_sysroot;
 use crate::shared_utils::rustflags_from_env;
 use crate::utils::{spawn_and_wait, CargoProject, Compiler, LogGroup};
-use crate::{CodegenBackend, SysrootKind};
+use crate::{build_sysroot, config, CodegenBackend, SysrootKind};
 
 static BUILD_EXAMPLE_OUT_DIR: RelPath = RelPath::BUILD.join("example");
 
@@ -77,7 +75,7 @@ const BASE_SYSROOT_SUITE: &[TestCase] = &[
     ),
     TestCase::build_lib("build.alloc_system", "example/alloc_system.rs", "lib"),
     TestCase::build_bin_and_run("aot.alloc_example", "example/alloc_example.rs", &[]),
-    TestCase::jit_bin("jit.std_example", "example/std_example.rs", ""),
+    TestCase::jit_bin("jit.std_example", "example/std_example.rs", "arg"),
     TestCase::build_bin_and_run("aot.std_example", "example/std_example.rs", &["arg"]),
     TestCase::build_bin_and_run("aot.dst_field_align", "example/dst-field-align.rs", &[]),
     TestCase::build_bin_and_run(
@@ -290,7 +288,7 @@ pub(crate) fn run_tests(
         && !skip_tests.contains(&"testsuite.extended_sysroot");
 
     if run_base_sysroot || run_extended_sysroot {
-        let mut target_compiler = build_sysroot::build_sysroot(
+        let target_compiler = build_sysroot::build_sysroot(
             dirs,
             channel,
             sysroot_kind,
@@ -299,11 +297,8 @@ pub(crate) fn run_tests(
             rustup_toolchain_name,
             target_triple.clone(),
         );
-        // Rust's build system denies a couple of lints that trigger on several of the test
-        // projects. Changing the code to fix them is not worth it, so just silence all lints.
-        target_compiler.rustflags.push("--cap-lints=allow".to_owned());
 
-        let runner = TestRunner::new(
+        let mut runner = TestRunner::new(
             dirs.clone(),
             target_compiler,
             use_unstable_features,
@@ -319,6 +314,9 @@ pub(crate) fn run_tests(
         }
 
         if run_extended_sysroot {
+            // Rust's build system denies a couple of lints that trigger on several of the test
+            // projects. Changing the code to fix them is not worth it, so just silence all lints.
+            runner.target_compiler.rustflags.push("--cap-lints=allow".to_owned());
             runner.run_testsuite(EXTENDED_SYSROOT_SUITE);
         } else {
             eprintln!("[SKIP] extended_sysroot tests");
@@ -329,7 +327,6 @@ pub(crate) fn run_tests(
 struct TestRunner<'a> {
     is_native: bool,
     jit_supported: bool,
-    use_unstable_features: bool,
     skip_tests: &'a [&'a str],
     dirs: Dirs,
     target_compiler: Compiler,
@@ -361,15 +358,7 @@ impl<'a> TestRunner<'a> {
             && target_compiler.triple.contains("x86_64")
             && !target_compiler.triple.contains("windows");
 
-        Self {
-            is_native,
-            jit_supported,
-            use_unstable_features,
-            skip_tests,
-            dirs,
-            target_compiler,
-            stdlib_source,
-        }
+        Self { is_native, jit_supported, skip_tests, dirs, target_compiler, stdlib_source }
     }
 
     fn run_testsuite(&self, tests: &[TestCase]) {
@@ -393,31 +382,13 @@ impl<'a> TestRunner<'a> {
             match *cmd {
                 TestCaseCmd::Custom { func } => func(self),
                 TestCaseCmd::BuildLib { source, crate_types } => {
-                    if self.use_unstable_features {
-                        self.run_rustc([source, "--crate-type", crate_types]);
-                    } else {
-                        self.run_rustc([
-                            source,
-                            "--crate-type",
-                            crate_types,
-                            "--cfg",
-                            "no_unstable_features",
-                        ]);
-                    }
+                    self.run_rustc([source, "--crate-type", crate_types]);
                 }
                 TestCaseCmd::BuildBin { source } => {
-                    if self.use_unstable_features {
-                        self.run_rustc([source]);
-                    } else {
-                        self.run_rustc([source, "--cfg", "no_unstable_features"]);
-                    }
+                    self.run_rustc([source]);
                 }
                 TestCaseCmd::BuildBinAndRun { source, args } => {
-                    if self.use_unstable_features {
-                        self.run_rustc([source]);
-                    } else {
-                        self.run_rustc([source, "--cfg", "no_unstable_features"]);
-                    }
+                    self.run_rustc([source]);
                     self.run_out_command(
                         source.split('/').last().unwrap().split('.').next().unwrap(),
                         args,
@@ -472,7 +443,6 @@ impl<'a> TestRunner<'a> {
         cmd.arg(&self.target_compiler.triple);
         cmd.arg("-Cpanic=abort");
         cmd.arg("-Zunstable-options");
-        cmd.arg("--check-cfg=cfg(no_unstable_features)");
         cmd.arg("--check-cfg=cfg(jit)");
         cmd.args(args);
         cmd

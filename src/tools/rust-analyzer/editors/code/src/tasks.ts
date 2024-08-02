@@ -1,18 +1,27 @@
 import * as vscode from "vscode";
-import * as toolchain from "./toolchain";
 import type { Config } from "./config";
-import { log } from "./util";
+import * as toolchain from "./toolchain";
 
 // This ends up as the `type` key in tasks.json. RLS also uses `cargo` and
 // our configuration should be compatible with it so use the same key.
-export const TASK_TYPE = "cargo";
-export const TASK_SOURCE = "rust";
+export const CARGO_TASK_TYPE = "cargo";
+export const SHELL_TASK_TYPE = "shell";
 
-export interface RustTargetDefinition extends vscode.TaskDefinition {
-    program: string;
-    args: string[];
-    cwd?: string;
-    env?: { [key: string]: string };
+export const RUST_TASK_SOURCE = "rust";
+
+export type TaskDefinition = vscode.TaskDefinition & {
+    readonly type: typeof CARGO_TASK_TYPE | typeof SHELL_TASK_TYPE;
+    args?: string[];
+    command: string;
+};
+
+export type CargoTaskDefinition = {
+    env?: Record<string, string>;
+    type: typeof CARGO_TASK_TYPE;
+} & TaskDefinition;
+
+function isCargoTask(definition: vscode.TaskDefinition): definition is CargoTaskDefinition {
+    return definition.type === CARGO_TASK_TYPE;
 }
 
 class RustTaskProvider implements vscode.TaskProvider {
@@ -23,6 +32,10 @@ class RustTaskProvider implements vscode.TaskProvider {
     }
 
     async provideTasks(): Promise<vscode.Task[]> {
+        if (!vscode.workspace.workspaceFolders) {
+            return [];
+        }
+
         // Detect Rust tasks. Currently we do not do any actual detection
         // of tasks (e.g. aliases in .cargo/config) and just return a fixed
         // set of tasks that always exist. These tasks cannot be removed in
@@ -37,17 +50,23 @@ class RustTaskProvider implements vscode.TaskProvider {
             { command: "run", group: undefined },
         ];
 
-        const cargoPath = await toolchain.cargoPath();
+        // FIXME: The server should provide this
+        const cargo = await toolchain.cargoPath();
 
         const tasks: vscode.Task[] = [];
-        for (const workspaceTarget of vscode.workspace.workspaceFolders || []) {
+        for (const workspaceTarget of vscode.workspace.workspaceFolders) {
             for (const def of defs) {
+                const definition = {
+                    command: def.command,
+                    type: CARGO_TASK_TYPE,
+                } as const;
+                const exec = await targetToExecution(definition, {}, cargo);
                 const vscodeTask = await buildRustTask(
                     workspaceTarget,
-                    { type: TASK_TYPE, program: cargoPath, args: [def.command] },
+                    definition,
                     `cargo ${def.command}`,
                     this.config.problemMatcher,
-                    this.config.cargoRunner,
+                    exec,
                 );
                 vscodeTask.group = def.group;
                 tasks.push(vscodeTask);
@@ -61,16 +80,14 @@ class RustTaskProvider implements vscode.TaskProvider {
         // VSCode calls this for every cargo task in the user's tasks.json,
         // we need to inform VSCode how to execute that command by creating
         // a ShellExecution for it.
-
-        const definition = task.definition as RustTargetDefinition;
-
-        if (definition.type === TASK_TYPE) {
-            return await buildRustTask(
+        if (isCargoTask(task.definition)) {
+            const exec = await targetToExecution(task.definition, { env: task.definition.env });
+            return buildRustTask(
                 task.scope,
-                definition,
+                task.definition,
                 task.name,
-                this.config.problemMatcher,
-                this.config.cargoRunner,
+                task.problemMatchers,
+                exec,
             );
         }
 
@@ -80,56 +97,44 @@ class RustTaskProvider implements vscode.TaskProvider {
 
 export async function buildRustTask(
     scope: vscode.WorkspaceFolder | vscode.TaskScope | undefined,
-    definition: RustTargetDefinition,
+    definition: TaskDefinition,
     name: string,
     problemMatcher: string[],
-    customRunner?: string,
-    throwOnError: boolean = false,
+    exec: vscode.ProcessExecution | vscode.ShellExecution,
 ): Promise<vscode.Task> {
-    let exec: vscode.ProcessExecution | vscode.ShellExecution | undefined = undefined;
-
-    if (customRunner) {
-        const runnerCommand = `${customRunner}.buildShellExecution`;
-        try {
-            const runnerArgs = {
-                kind: TASK_TYPE,
-                args: definition.args,
-                cwd: definition.cwd,
-                env: definition.env,
-            };
-            const customExec = await vscode.commands.executeCommand(runnerCommand, runnerArgs);
-            if (customExec) {
-                if (customExec instanceof vscode.ShellExecution) {
-                    exec = customExec;
-                } else {
-                    log.debug("Invalid cargo ShellExecution", customExec);
-                    throw "Invalid cargo ShellExecution.";
-                }
-            }
-            // fallback to default processing
-        } catch (e) {
-            if (throwOnError) throw `Cargo runner '${customRunner}' failed! ${e}`;
-            // fallback to default processing
-        }
-    }
-
-    if (!exec) {
-        exec = new vscode.ProcessExecution(definition.program, definition.args, definition);
-    }
-
     return new vscode.Task(
         definition,
         // scope can sometimes be undefined. in these situations we default to the workspace taskscope as
         // recommended by the official docs: https://code.visualstudio.com/api/extension-guides/task-provider#task-provider)
         scope ?? vscode.TaskScope.Workspace,
         name,
-        TASK_SOURCE,
+        RUST_TASK_SOURCE,
         exec,
         problemMatcher,
     );
 }
 
+export async function targetToExecution(
+    definition: TaskDefinition,
+    options?: {
+        env?: { [key: string]: string };
+        cwd?: string;
+    },
+    cargo?: string,
+): Promise<vscode.ProcessExecution | vscode.ShellExecution> {
+    let command, args;
+    if (isCargoTask(definition)) {
+        // FIXME: The server should provide cargo
+        command = cargo || (await toolchain.cargoPath(options?.env));
+        args = [definition.command].concat(definition.args || []);
+    } else {
+        command = definition.command;
+        args = definition.args || [];
+    }
+    return new vscode.ProcessExecution(command, args, options);
+}
+
 export function activateTaskProvider(config: Config): vscode.Disposable {
     const provider = new RustTaskProvider(config);
-    return vscode.tasks.registerTaskProvider(TASK_TYPE, provider);
+    return vscode.tasks.registerTaskProvider(CARGO_TASK_TYPE, provider);
 }

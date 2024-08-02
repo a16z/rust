@@ -8,10 +8,10 @@ LL |     use std::convert::TryFrom;
    = note: the item `TryFrom` is already defined here
    |
 note: the lint level is defined here
-  --> $DIR/suggest-remove-issue-121315.rs:2:9
+  --> $DIR/suggest-remove-issue-121315.rs:2:25
    |
-LL | #![deny(unused_imports)]
-   |         ^^^^^^^^^^^^^^
+LL | #![deny(unused_imports, redundant_imports)]
+   |                         ^^^^^^^^^^^^^^^^^
 
 error: the item `TryFrom` is imported redundantly
   --> $DIR/suggest-remove-issue-121315.rs:14:24
@@ -36,6 +36,12 @@ error: unused import: `AsMut`
    |
 LL |     use std::convert::{AsMut, Into};
    |                        ^^^^^
+   |
+note: the lint level is defined here
+  --> $DIR/suggest-remove-issue-121315.rs:2:9
+   |
+LL | #![deny(unused_imports, redundant_imports)]
+   |         ^^^^^^^^^^^^^^
 
 error: the item `Into` is imported redundantly
   --> $DIR/suggest-remove-issue-121315.rs:24:31

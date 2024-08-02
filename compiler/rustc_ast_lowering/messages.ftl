@@ -5,6 +5,7 @@ ast_lowering_abi_specified_multiple_times =
 
 ast_lowering_arbitrary_expression_in_pattern =
     arbitrary expressions aren't allowed in patterns
+    .pattern_from_macro_note = the `expr` fragment specifier forces the metavariable's content to be an expression
 
 ast_lowering_argument = argument
 
@@ -35,9 +36,14 @@ ast_lowering_bad_return_type_notation_inputs =
     argument types not allowed with return type notation
     .suggestion = remove the input types
 
+ast_lowering_bad_return_type_notation_needs_dots = return type notation arguments must be elided with `..`
+    .suggestion = add `..`
+
 ast_lowering_bad_return_type_notation_output =
     return type not allowed with return type notation
     .suggestion = remove the return type
+
+ast_lowering_bad_return_type_notation_position = return type notation not allowed in this position yet
 
 ast_lowering_base_expression_double_dot =
     base expression required after `..`
@@ -77,7 +83,7 @@ ast_lowering_inline_asm_unsupported_target =
 ast_lowering_invalid_abi =
     invalid ABI: found `{$abi}`
     .label = invalid ABI
-    .note = invoke `{$command}` for a full list of supported calling conventions.
+    .note = invoke `{$command}` for a full list of supported calling conventions
 
 ast_lowering_invalid_abi_clobber_abi =
     invalid ABI for `clobber_abi`
@@ -127,6 +133,11 @@ ast_lowering_never_pattern_with_guard =
     a guard on a never pattern will never be run
     .suggestion = remove this guard
 
+ast_lowering_no_precise_captures_on_apit = `use<...>` precise capturing syntax not allowed in argument-position `impl Trait`
+
+ast_lowering_no_precise_captures_on_rpitit = `use<...>` precise capturing syntax is currently not allowed in return-position `impl Trait` in traits
+    .note = currently, return-position `impl Trait` in traits and trait implementations capture all lifetimes in scope
+
 ast_lowering_previously_used_here = previously used here
 
 ast_lowering_register1 = register `{$reg1_name}`
@@ -161,3 +172,6 @@ ast_lowering_underscore_expr_lhs_assign =
     .label = `_` not allowed here
 
 ast_lowering_use_angle_brackets = use angle brackets instead
+ast_lowering_yield_in_closure =
+    `yield` can only be used in `#[coroutine]` closures, or `gen` blocks
+    .suggestion = use `#[coroutine]` to make this closure a coroutine

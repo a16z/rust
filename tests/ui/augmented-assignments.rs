@@ -1,5 +1,6 @@
 use std::ops::AddAssign;
 
+#[derive(Clone)]
 struct Int(i32);
 
 impl AddAssign for Int {

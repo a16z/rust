@@ -12,9 +12,13 @@
 #![allow(
     clippy::cast_abs_to_unsigned,
     clippy::no_effect,
+    clippy::unnecessary_min_or_max,
     clippy::unnecessary_operation,
-    clippy::unnecessary_literal_unwrap
+    clippy::unnecessary_literal_unwrap,
+    clippy::identity_op
 )]
+
+// FIXME(f16_f128): add tests once const casting is available for these types
 
 fn main() {
     // Test clippy::cast_precision_loss
@@ -463,7 +467,37 @@ fn issue11642() {
     }
 }
 
+fn issue11738() {
+    macro_rules! m {
+        () => {
+            let _ = i32::MIN as u32; // cast_sign_loss
+            let _ = u32::MAX as u8; // cast_possible_truncation
+            let _ = std::f64::consts::PI as f32; // cast_possible_truncation
+            let _ = 0i8 as i32; // cast_lossless
+        };
+    }
+    m!();
+}
+
 fn issue12506() -> usize {
     let bar: Result<Option<i64>, u32> = Ok(Some(10));
     bar.unwrap().unwrap() as usize
+}
+
+fn issue12721() {
+    fn x() -> u64 {
+        u64::MAX
+    }
+
+    // Don't lint.
+    (255 & 999999u64) as u8;
+    // Don't lint.
+    let _ = ((x() & 255) & 999999) as u8;
+    // Don't lint.
+    let _ = (999999 & (x() & 255)) as u8;
+
+    (256 & 999999u64) as u8;
+    //~^ ERROR: casting `u64` to `u8` may truncate the value
+    (255 % 999999u64) as u8;
+    //~^ ERROR: casting `u64` to `u8` may truncate the value
 }

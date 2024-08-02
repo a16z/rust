@@ -3,14 +3,13 @@ mod tests;
 
 use hashbrown::hash_set as base;
 
+use super::map::map_try_reserve_error;
 use crate::borrow::Borrow;
 use crate::collections::TryReserveError;
 use crate::fmt;
 use crate::hash::{BuildHasher, Hash, RandomState};
 use crate::iter::{Chain, FusedIterator};
 use crate::ops::{BitAnd, BitOr, BitXor, Sub};
-
-use super::map::map_try_reserve_error;
 
 /// A [hash set] implemented as a `HashMap` where the value is `()`.
 ///
@@ -978,6 +977,10 @@ where
         Self { base: self.base.clone() }
     }
 
+    /// Overwrites the contents of `self` with a clone of the contents of `source`.
+    ///
+    /// This method is preferred over simply assigning `source.clone()` to `self`,
+    /// as it avoids reallocation if possible.
     #[inline]
     fn clone_from(&mut self, other: &Self) {
         self.base.clone_from(&other.base);

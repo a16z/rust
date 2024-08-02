@@ -7,7 +7,7 @@ LL | use m1::*;
 note: the lint level is defined here
   --> $DIR/use-redundant.rs:2:9
    |
-LL | #![warn(unused_imports)]
+LL | #![warn(unused_imports, redundant_imports)]
    |         ^^^^^^^^^^^^^^
 
 warning: unused import: `m2::*`
@@ -24,6 +24,12 @@ LL | use crate::foo::Bar;
 ...
 LL |     use crate::foo::Bar;
    |         ^^^^^^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> $DIR/use-redundant.rs:2:25
+   |
+LL | #![warn(unused_imports, redundant_imports)]
+   |                         ^^^^^^^^^^^^^^^^^
 
 warning: 3 warnings emitted
 

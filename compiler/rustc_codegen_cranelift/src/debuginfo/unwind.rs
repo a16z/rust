@@ -1,7 +1,8 @@
 //! Unwind info generation (`.eh_frame`)
 
 use cranelift_codegen::ir::Endianness;
-use cranelift_codegen::isa::{unwind::UnwindInfo, TargetIsa};
+use cranelift_codegen::isa::unwind::UnwindInfo;
+use cranelift_codegen::isa::TargetIsa;
 use cranelift_object::ObjectProduct;
 use gimli::write::{CieId, EhFrame, FrameTable, Section};
 use gimli::RunTimeEndian;
@@ -38,6 +39,14 @@ impl UnwindContext {
     }
 
     pub(crate) fn add_function(&mut self, func_id: FuncId, context: &Context, isa: &dyn TargetIsa) {
+        if let target_lexicon::OperatingSystem::MacOSX { .. } = isa.triple().operating_system {
+            // The object crate doesn't currently support DW_GNU_EH_PE_absptr, which macOS
+            // requires for unwinding tables. In addition on arm64 it currently doesn't
+            // support 32bit relocations as we currently use for the unwinding table.
+            // See gimli-rs/object#415 and rust-lang/rustc_codegen_cranelift#1371
+            return;
+        }
+
         let unwind_info = if let Some(unwind_info) =
             context.compiled_code().unwrap().create_unwind_info(isa).unwrap()
         {

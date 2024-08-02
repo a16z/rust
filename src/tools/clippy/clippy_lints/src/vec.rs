@@ -2,12 +2,13 @@ use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 
 use clippy_config::msrvs::{self, Msrv};
+use clippy_config::Conf;
 use clippy_utils::consts::{constant, Constant};
 use clippy_utils::diagnostics::span_lint_hir_and_then;
 use clippy_utils::source::snippet_opt;
 use clippy_utils::ty::is_copy;
 use clippy_utils::visitors::for_each_local_use_after_expr;
-use clippy_utils::{get_parent_expr, higher, is_trait_method};
+use clippy_utils::{get_parent_expr, higher, is_in_test, is_trait_method};
 use rustc_errors::Applicability;
 use rustc_hir::{BorrowKind, Expr, ExprKind, HirId, LetStmt, Mutability, Node, Pat, PatKind};
 use rustc_lint::{LateContext, LateLintPass};
@@ -17,11 +18,21 @@ use rustc_session::impl_lint_pass;
 use rustc_span::{sym, DesugaringKind, Span};
 
 #[expect(clippy::module_name_repetitions)]
-#[derive(Clone)]
 pub struct UselessVec {
-    pub too_large_for_stack: u64,
-    pub msrv: Msrv,
-    pub span_to_lint_map: BTreeMap<Span, Option<(HirId, SuggestedType, String, Applicability)>>,
+    too_large_for_stack: u64,
+    msrv: Msrv,
+    span_to_lint_map: BTreeMap<Span, Option<(HirId, SuggestedType, String, Applicability)>>,
+    allow_in_test: bool,
+}
+impl UselessVec {
+    pub fn new(conf: &'static Conf) -> Self {
+        Self {
+            too_large_for_stack: conf.too_large_for_stack,
+            msrv: conf.msrv.clone(),
+            span_to_lint_map: BTreeMap::new(),
+            allow_in_test: conf.allow_useless_vec_in_tests,
+        }
+    }
 }
 
 declare_clippy_lint! {
@@ -55,6 +66,9 @@ impl_lint_pass!(UselessVec => [USELESS_VEC]);
 impl<'tcx> LateLintPass<'tcx> for UselessVec {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'_>) {
         let Some(vec_args) = higher::VecArgs::hir(cx, expr.peel_borrows()) else {
+            return;
+        };
+        if self.allow_in_test && is_in_test(cx.tcx, expr.hir_id) {
             return;
         };
         // the parent callsite of this `vec!` expression, or span to the borrowed one such as `&vec!`

@@ -1,13 +1,5 @@
-use crate::base;
-use crate::common::{self, CodegenCx};
-use crate::debuginfo;
-use crate::errors::{
-    InvalidMinimumAlignmentNotPowerOfTwo, InvalidMinimumAlignmentTooLarge, SymbolAlreadyDefined,
-};
-use crate::llvm::{self, True};
-use crate::type_::Type;
-use crate::type_of::LayoutLlvmExt;
-use crate::value::Value;
+use std::ops::Range;
+
 use rustc_codegen_ssa::traits::*;
 use rustc_hir::def::DefKind;
 use rustc_hir::def_id::DefId;
@@ -24,10 +16,34 @@ use rustc_session::config::Lto;
 use rustc_target::abi::{
     Align, AlignFromBytesError, HasDataLayout, Primitive, Scalar, Size, WrappingRange,
 };
-use std::ops::Range;
+use tracing::{debug, instrument, trace};
 
-pub fn const_alloc_to_llvm<'ll>(cx: &CodegenCx<'ll, '_>, alloc: ConstAllocation<'_>) -> &'ll Value {
+use crate::common::{self, CodegenCx};
+use crate::errors::{
+    InvalidMinimumAlignmentNotPowerOfTwo, InvalidMinimumAlignmentTooLarge, SymbolAlreadyDefined,
+};
+use crate::llvm::{self, True};
+use crate::type_::Type;
+use crate::type_of::LayoutLlvmExt;
+use crate::value::Value;
+use crate::{base, debuginfo};
+
+pub fn const_alloc_to_llvm<'ll>(
+    cx: &CodegenCx<'ll, '_>,
+    alloc: ConstAllocation<'_>,
+    is_static: bool,
+) -> &'ll Value {
     let alloc = alloc.inner();
+    // We expect that callers of const_alloc_to_llvm will instead directly codegen a pointer or
+    // integer for any &ZST where the ZST is a constant (i.e. not a static). We should never be
+    // producing empty LLVM allocations as they're just adding noise to binaries and forcing less
+    // optimal codegen.
+    //
+    // Statics have a guaranteed meaningful address so it's less clear that we want to do
+    // something like this; it's also harder.
+    if !is_static {
+        assert!(alloc.len() != 0);
+    }
     let mut llvals = Vec::with_capacity(alloc.provenance().ptrs().len() + 1);
     let dl = cx.data_layout();
     let pointer_size = dl.pointer_size.bytes() as usize;
@@ -120,7 +136,7 @@ fn codegen_static_initializer<'ll, 'tcx>(
     def_id: DefId,
 ) -> Result<(&'ll Value, ConstAllocation<'tcx>), ErrorHandled> {
     let alloc = cx.tcx.eval_static_initializer(def_id)?;
-    Ok((const_alloc_to_llvm(cx, alloc), alloc))
+    Ok((const_alloc_to_llvm(cx, alloc, /*static*/ true), alloc))
 }
 
 fn set_global_alignment<'ll>(cx: &CodegenCx<'ll, '_>, gv: &'ll Value, mut align: Align) {
@@ -246,7 +262,8 @@ impl<'ll> CodegenCx<'ll, '_> {
 
     #[instrument(level = "debug", skip(self, llty))]
     pub(crate) fn get_static_inner(&self, def_id: DefId, llty: &'ll Type) -> &'ll Value {
-        if let Some(&g) = self.instances.borrow().get(&Instance::mono(self.tcx, def_id)) {
+        let instance = Instance::mono(self.tcx, def_id);
+        if let Some(&g) = self.instances.borrow().get(&instance) {
             trace!("used cached value");
             return g;
         }
@@ -259,7 +276,7 @@ impl<'ll> CodegenCx<'ll, '_> {
                  statics defined in the same CGU, but did not for `{def_id:?}`"
         );
 
-        let sym = self.tcx.symbol_name(Instance::mono(self.tcx, def_id)).name;
+        let sym = self.tcx.symbol_name(instance).name;
         let fn_attrs = self.tcx.codegen_fn_attrs(def_id);
 
         debug!(?sym, ?fn_attrs);
@@ -314,7 +331,7 @@ impl<'ll> CodegenCx<'ll, '_> {
 
             // If this assertion triggers, there's something wrong with commandline
             // argument validation.
-            debug_assert!(
+            assert!(
                 !(self.tcx.sess.opts.cg.linker_plugin_lto.enabled()
                     && self.tcx.sess.target.is_like_windows
                     && self.tcx.sess.opts.cg.prefer_dynamic)
@@ -349,7 +366,7 @@ impl<'ll> CodegenCx<'ll, '_> {
             }
         }
 
-        self.instances.borrow_mut().insert(Instance::mono(self.tcx, def_id), g);
+        self.instances.borrow_mut().insert(instance, g);
         g
     }
 
@@ -479,8 +496,14 @@ impl<'ll> CodegenCx<'ll, '_> {
             }
 
             // Wasm statics with custom link sections get special treatment as they
-            // go into custom sections of the wasm executable.
-            if self.tcx.sess.target.is_like_wasm {
+            // go into custom sections of the wasm executable. The exception to this
+            // is the `.init_array` section which are treated specially by the wasm linker.
+            if self.tcx.sess.target.is_like_wasm
+                && attrs
+                    .link_section
+                    .map(|link_section| !link_section.as_str().starts_with(".init_array"))
+                    .unwrap_or(true)
+            {
                 if let Some(section) = attrs.link_section {
                     let section = llvm::LLVMMDStringInContext2(
                         self.llcx,
