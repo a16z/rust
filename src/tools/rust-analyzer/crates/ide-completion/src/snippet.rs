@@ -100,6 +100,7 @@
 // }
 // ----
 
+use hir::ImportPathConfig;
 use ide_db::imports::import_assets::LocatedImport;
 use itertools::Itertools;
 use syntax::{ast, AstNode, GreenNode, SyntaxNode};
@@ -168,18 +169,23 @@ impl Snippet {
 }
 
 fn import_edits(ctx: &CompletionContext<'_>, requires: &[GreenNode]) -> Option<Vec<LocatedImport>> {
+    let import_cfg = ImportPathConfig {
+        prefer_no_std: ctx.config.prefer_no_std,
+        prefer_prelude: ctx.config.prefer_prelude,
+        prefer_absolute: ctx.config.prefer_absolute,
+    };
+
     let resolve = |import: &GreenNode| {
         let path = ast::Path::cast(SyntaxNode::new_root(import.clone()))?;
         let item = match ctx.scope.speculative_resolve(&path)? {
             hir::PathResolution::Def(def) => def.into(),
             _ => return None,
         };
-        let path = ctx.module.find_use_path_prefixed(
+        let path = ctx.module.find_use_path(
             ctx.db,
             item,
             ctx.config.insert_use.prefix_kind,
-            ctx.config.prefer_no_std,
-            ctx.config.prefer_prelude,
+            import_cfg,
         )?;
         Some((path.len() > 1).then(|| LocatedImport::new(path.clone(), item, item)))
     };
@@ -200,10 +206,11 @@ fn validate_snippet(
 ) -> Option<(Box<[GreenNode]>, String, Option<Box<str>>)> {
     let mut imports = Vec::with_capacity(requires.len());
     for path in requires.iter() {
-        let use_path = ast::SourceFile::parse(&format!("use {path};"))
-            .syntax_node()
-            .descendants()
-            .find_map(ast::Path::cast)?;
+        let use_path =
+            ast::SourceFile::parse(&format!("use {path};"), syntax::Edition::CURRENT_FIXME)
+                .syntax_node()
+                .descendants()
+                .find_map(ast::Path::cast)?;
         if use_path.syntax().text() != path.as_str() {
             return None;
         }

@@ -2,7 +2,7 @@ use clippy_utils::diagnostics::span_lint_and_help;
 use rustc_hir::{HirId, Item, ItemKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::layout::LayoutOf;
-use rustc_middle::ty::{self, FieldDef, GenericArg, List};
+use rustc_middle::ty::{self, FieldDef};
 use rustc_session::declare_lint_pass;
 use rustc_span::sym;
 
@@ -10,7 +10,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Displays a warning when a union is declared with the default representation (without a `#[repr(C)]` attribute).
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// Unions in Rust have unspecified layout by default, despite many people thinking that they
     /// lay out each field at the start of the union (like C does). That is, there are no guarantees
     /// about the offset of the fields for unions with multiple non-ZST fields without an explicitly
@@ -85,7 +85,7 @@ fn is_union_with_two_non_zst_fields<'tcx>(cx: &LateContext<'tcx>, item: &Item<'t
     }
 }
 
-fn is_zst<'tcx>(cx: &LateContext<'tcx>, field: &FieldDef, args: &'tcx List<GenericArg<'tcx>>) -> bool {
+fn is_zst<'tcx>(cx: &LateContext<'tcx>, field: &FieldDef, args: ty::GenericArgsRef<'tcx>) -> bool {
     let ty = field.ty(cx.tcx, args);
     if let Ok(layout) = cx.layout_of(ty) {
         layout.is_zst()

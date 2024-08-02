@@ -1,5 +1,5 @@
 // skip-filecheck
-//@ unit-test: GVN
+//@ test-mir-pass: GVN
 //@ ignore-endian-big
 // EMIT_MIR_FOR_EACH_BIT_WIDTH
 // EMIT_MIR const_allocation3.main.GVN.after.mir
@@ -7,7 +7,7 @@ fn main() {
     FOO;
 }
 
-#[repr(packed)]
+#[repr(C, packed)]
 struct Packed {
     a: [u8; 28],
     b: &'static i32,

@@ -618,69 +618,9 @@ crate being documented (`foobar`) and a path to output the calls
 To scrape examples from test code, e.g. functions marked `#[test]`, then
 add the `--scrape-tests` flag.
 
-### `--check-cfg`: check configuration flags
-
- * Tracking issue: [#82450](https://github.com/rust-lang/rust/issues/82450)
-
-This flag accepts the same values as `rustc --check-cfg`, and uses it to check configuration flags.
-
-Using this flag looks like this:
-
-```bash
-$ rustdoc src/lib.rs -Z unstable-options \
-    --check-cfg='cfg(feature, values("foo", "bar"))'
-```
-
-The example above check every well known names and values (`target_os`, `doc`, `test`, ...)
-and check the values of `feature`: `foo` and `bar`.
-
 ### `--generate-link-to-definition`: Generate links on types in source code
 
  * Tracking issue: [#89095](https://github.com/rust-lang/rust/issues/89095)
 
 This flag enables the generation of links in the source code pages which allow the reader
 to jump to a type definition.
-
-### Custom CSS classes for code blocks
-
-```rust
-#![feature(custom_code_classes_in_docs)]
-
-/// ```custom,{class=language-c}
-/// int main(void) { return 0; }
-/// ```
-pub struct Bar;
-```
-
-The text `int main(void) { return 0; }` is rendered without highlighting in a code block
-with the class `language-c`. This can be used to highlight other languages through JavaScript
-libraries for example.
-
-Without the `custom` attribute, it would be generated as a Rust code example with an additional
-`language-C` CSS class. Therefore, if you specifically don't want it to be a Rust code example,
-don't forget to add the `custom` attribute.
-
-To be noted that you can replace `class=` with `.` to achieve the same result:
-
-```rust
-#![feature(custom_code_classes_in_docs)]
-
-/// ```custom,{.language-c}
-/// int main(void) { return 0; }
-/// ```
-pub struct Bar;
-```
-
-To be noted, `rust` and `.rust`/`class=rust` have different effects: `rust` indicates that this is
-a Rust code block whereas the two others add a "rust" CSS class on the code block.
-
-You can also use double quotes:
-
-```rust
-#![feature(custom_code_classes_in_docs)]
-
-/// ```"not rust" {."hello everyone"}
-/// int main(void) { return 0; }
-/// ```
-pub struct Bar;
-```

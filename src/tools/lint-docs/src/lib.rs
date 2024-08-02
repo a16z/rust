@@ -3,9 +3,48 @@ use std::fmt::Write;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
 use walkdir::WalkDir;
 
 mod groups;
+
+/// List of lints which have been renamed.
+///
+/// These will get redirects in the output to the new name. The
+/// format is `(level, [(old_name, new_name), ...])`.
+///
+/// Note: This hard-coded list is a temporary hack. The intent is in the
+/// future to have `rustc` expose this information in some way (like a `-Z`
+/// flag spitting out JSON). Also, this does not yet support changing the
+/// level of the lint, which will be more difficult to support, since rustc
+/// currently does not track that historical information.
+static RENAMES: &[(Level, &[(&str, &str)])] = &[
+    (
+        Level::Allow,
+        &[
+            ("single-use-lifetime", "single-use-lifetimes"),
+            ("elided-lifetime-in-path", "elided-lifetimes-in-paths"),
+            ("async-idents", "keyword-idents"),
+            ("disjoint-capture-migration", "rust-2021-incompatible-closure-captures"),
+            ("keyword-idents", "keyword-idents-2018"),
+            ("or-patterns-back-compat", "rust-2021-incompatible-or-patterns"),
+        ],
+    ),
+    (
+        Level::Warn,
+        &[
+            ("bare-trait-object", "bare-trait-objects"),
+            ("unstable-name-collision", "unstable-name-collisions"),
+            ("unused-doc-comment", "unused-doc-comments"),
+            ("redundant-semicolon", "redundant-semicolons"),
+            ("overlapping-patterns", "overlapping-range-endpoints"),
+            ("non-fmt-panic", "non-fmt-panics"),
+            ("unused-tuple-struct-fields", "dead-code"),
+            ("static-mut-ref", "static-mut-refs"),
+        ],
+    ),
+    (Level::Deny, &[("exceeding-bitshifts", "arithmetic-overflow")]),
+];
 
 pub struct LintExtractor<'a> {
     /// Path to the `src` directory, where it will scan for `.rs` files to
@@ -46,8 +85,8 @@ impl Lint {
         for &expected in &["### Example", "### Explanation", "{{produces}}"] {
             if expected == "{{produces}}" && self.is_ignored() {
                 if self.doc_contains("{{produces}}") {
-                    return Err(format!(
-                        "the lint example has `ignore`, but also contains the {{{{produces}}}} marker\n\
+                    return Err(
+                        "the lint example has `ignore`, but also contains the {{produces}} marker\n\
                         \n\
                         The documentation generator cannot generate the example output when the \
                         example is ignored.\n\
@@ -73,7 +112,7 @@ impl Lint {
                         Replacing the output with the text of the example you \
                         compiled manually yourself.\n\
                         "
-                    ).into());
+                    .into());
                 }
                 continue;
             }
@@ -126,6 +165,7 @@ impl<'a> LintExtractor<'a> {
                 )
             })?;
         }
+        add_renamed_lints(&mut lints);
         self.save_lints_markdown(&lints)?;
         self.generate_group_docs(&lints)?;
         Ok(())
@@ -270,7 +310,6 @@ impl<'a> LintExtractor<'a> {
         if matches!(
             lint.name.as_str(),
             "unused_features" // broken lint
-            | "unstable_features" // deprecated
         ) {
             return Ok(());
         }
@@ -403,10 +442,19 @@ impl<'a> LintExtractor<'a> {
         fs::write(&tempfile, source)
             .map_err(|e| format!("failed to write {}: {}", tempfile.display(), e))?;
         let mut cmd = Command::new(self.rustc_path);
-        if options.contains(&"edition2015") {
-            cmd.arg("--edition=2015");
-        } else {
+        if options.contains(&"edition2024") {
+            cmd.arg("--edition=2024");
+        } else if options.contains(&"edition2021") {
+            cmd.arg("--edition=2021");
+        } else if options.contains(&"edition2018") {
             cmd.arg("--edition=2018");
+        } else if options.contains(&"edition2015") {
+            cmd.arg("--edition=2015");
+        } else if options.contains(&"edition") {
+            panic!("lint-docs: unknown edition");
+        } else {
+            // defaults to latest edition
+            cmd.arg("--edition=2021");
         }
         cmd.arg("--error-format=json");
         cmd.arg("--target").arg(self.rustc_target);
@@ -472,23 +520,74 @@ impl<'a> LintExtractor<'a> {
         let mut these_lints: Vec<_> = lints.iter().filter(|lint| lint.level == level).collect();
         these_lints.sort_unstable_by_key(|lint| &lint.name);
         for lint in &these_lints {
-            write!(result, "* [`{}`](#{})\n", lint.name, lint.name.replace("_", "-")).unwrap();
+            writeln!(result, "* [`{}`](#{})", lint.name, lint.name.replace('_', "-")).unwrap();
         }
         result.push('\n');
         for lint in &these_lints {
-            write!(result, "## {}\n\n", lint.name.replace("_", "-")).unwrap();
+            write!(result, "## {}\n\n", lint.name.replace('_', "-")).unwrap();
             for line in &lint.doc {
                 result.push_str(line);
                 result.push('\n');
             }
             result.push('\n');
         }
+        add_rename_redirect(level, &mut result);
         let out_path = self.out_path.join("listing").join(level.doc_filename());
-        // Delete the output because rustbuild uses hard links in its copies.
+        // Delete the output because bootstrap uses hard links in its copies.
         let _ = fs::remove_file(&out_path);
         fs::write(&out_path, result)
             .map_err(|e| format!("could not write to {}: {}", out_path.display(), e))?;
         Ok(())
+    }
+}
+
+/// Adds `Lint`s that have been renamed.
+fn add_renamed_lints(lints: &mut Vec<Lint>) {
+    for (level, names) in RENAMES {
+        for (from, to) in *names {
+            lints.push(Lint {
+                name: from.to_string(),
+                doc: vec![format!("The lint `{from}` has been renamed to [`{to}`](#{to}).")],
+                level: *level,
+                path: PathBuf::new(),
+                lineno: 0,
+            });
+        }
+    }
+}
+
+// This uses DOMContentLoaded instead of running immediately because for some
+// reason on Firefox (124 of this writing) doesn't update the `target` CSS
+// selector if only the hash changes.
+static RENAME_START: &str = "
+<script>
+document.addEventListener(\"DOMContentLoaded\", (event) => {
+    var fragments = {
+";
+
+static RENAME_END: &str = "\
+    };
+    var target = fragments[window.location.hash];
+    if (target) {
+        var url = window.location.toString();
+        var base = url.substring(0, url.lastIndexOf('/'));
+        window.location.replace(base + \"/\" + target);
+    }
+});
+</script>
+";
+
+/// Adds the javascript redirection code to the given markdown output.
+fn add_rename_redirect(level: Level, output: &mut String) {
+    for (rename_level, names) in RENAMES {
+        if *rename_level == level {
+            let filename = level.doc_filename().replace(".md", ".html");
+            output.push_str(RENAME_START);
+            for (from, to) in *names {
+                writeln!(output, "        \"#{from}\": \"{filename}#{to}\",").unwrap();
+            }
+            output.push_str(RENAME_END);
+        }
     }
 }
 

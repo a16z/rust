@@ -1,10 +1,11 @@
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_sugg;
+use clippy_utils::is_in_test;
 use clippy_utils::macros::{macro_backtrace, MacroCall};
 use clippy_utils::source::snippet_with_applicability;
-use clippy_utils::{is_in_cfg_test, is_in_test_function};
 use rustc_data_structures::fx::FxHashSet;
 use rustc_errors::Applicability;
-use rustc_hir::{Expr, ExprKind, HirId, Node};
+use rustc_hir::{Expr, ExprKind, Node};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::lint::in_external_macro;
 use rustc_session::impl_lint_pass;
@@ -14,7 +15,7 @@ declare_clippy_lint! {
     /// ### What it does
     /// Checks for usage of the [`dbg!`](https://doc.rust-lang.org/std/macro.dbg.html) macro.
     ///
-    /// ### Why is this bad?
+    /// ### Why restrict this?
     /// The `dbg!` macro is intended as a debugging tool. It should not be present in released
     /// software or committed to a version control system.
     ///
@@ -33,7 +34,6 @@ declare_clippy_lint! {
     "`dbg!` macro is intended as a debugging tool"
 }
 
-#[derive(Clone)]
 pub struct DbgMacro {
     allow_dbg_in_tests: bool,
     /// Tracks the `dbg!` macro callsites that are already checked.
@@ -45,9 +45,9 @@ pub struct DbgMacro {
 impl_lint_pass!(DbgMacro => [DBG_MACRO]);
 
 impl DbgMacro {
-    pub fn new(allow_dbg_in_tests: bool) -> Self {
+    pub fn new(conf: &'static Conf) -> Self {
         DbgMacro {
-            allow_dbg_in_tests,
+            allow_dbg_in_tests: conf.allow_dbg_in_tests,
             checked_dbg_call_site: FxHashSet::default(),
             prev_ctxt: SyntaxContext::root(),
         }
@@ -63,7 +63,7 @@ impl LateLintPass<'_> for DbgMacro {
             !in_external_macro(cx.sess(), macro_call.span) &&
             self.checked_dbg_call_site.insert(macro_call.span) &&
             // allows `dbg!` in test code if allow-dbg-in-test is set to true in clippy.toml
-            !(self.allow_dbg_in_tests && is_in_test(cx, expr.hir_id))
+            !(self.allow_dbg_in_tests && is_in_test(cx.tcx, expr.hir_id))
         {
             let mut applicability = Applicability::MachineApplicable;
 
@@ -127,10 +127,6 @@ impl LateLintPass<'_> for DbgMacro {
     fn check_crate_post(&mut self, _: &LateContext<'_>) {
         self.checked_dbg_call_site = FxHashSet::default();
     }
-}
-
-fn is_in_test(cx: &LateContext<'_>, hir_id: HirId) -> bool {
-    is_in_test_function(cx.tcx, hir_id) || is_in_cfg_test(cx.tcx, hir_id)
 }
 
 fn first_dbg_macro_in_expansion(cx: &LateContext<'_>, span: Span) -> Option<MacroCall> {

@@ -1,16 +1,12 @@
 use super::Builder;
 use crate::any::Any;
-use crate::mem;
 use crate::panic::panic_any;
-use crate::result;
-use crate::sync::{
-    atomic::{AtomicBool, Ordering},
-    mpsc::{channel, Sender},
-    Arc, Barrier,
-};
+use crate::sync::atomic::{AtomicBool, Ordering};
+use crate::sync::mpsc::{channel, Sender};
+use crate::sync::{Arc, Barrier};
 use crate::thread::{self, Scope, ThreadId};
-use crate::time::Duration;
-use crate::time::Instant;
+use crate::time::{Duration, Instant};
+use crate::{mem, result};
 
 // !!! These tests are dangerous. If something is buggy, they will hang, !!!
 // !!! instead of exiting cleanly. This might wedge the buildbots.       !!!
@@ -40,11 +36,7 @@ fn test_named_thread() {
 #[cfg(any(
     // Note: musl didn't add pthread_getname_np until 1.2.3
     all(target_os = "linux", target_env = "gnu"),
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "tvos",
-    target_os = "watchos",
-    target_os = "visionos",
+    target_vendor = "apple",
 ))]
 #[test]
 fn test_named_thread_truncation() {

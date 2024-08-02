@@ -197,7 +197,9 @@ fn structure_token(token: SyntaxToken) -> Option<StructureNode> {
     if let Some(comment) = ast::Comment::cast(token) {
         let text = comment.text().trim();
 
-        if let Some(region_name) = text.strip_prefix("// region:").map(str::trim) {
+        if let Some(region_name) =
+            text.strip_prefix("// region:").map(str::trim).filter(|it| !it.is_empty())
+        {
             return Some(StructureNode {
                 parent: None,
                 label: region_name.to_owned(),
@@ -220,7 +222,7 @@ mod tests {
     use super::*;
 
     fn check(ra_fixture: &str, expect: Expect) {
-        let file = SourceFile::parse(ra_fixture).ok().unwrap();
+        let file = SourceFile::parse(ra_fixture, span::Edition::CURRENT).ok().unwrap();
         let structure = file_structure(&file);
         expect.assert_debug_eq(&structure)
     }

@@ -40,12 +40,13 @@ pub enum CoroutineState<Y, R> {
 /// ```rust
 /// #![feature(coroutines)]
 /// #![feature(coroutine_trait)]
+/// #![feature(stmt_expr_attributes)]
 ///
 /// use std::ops::{Coroutine, CoroutineState};
 /// use std::pin::Pin;
 ///
 /// fn main() {
-///     let mut coroutine = || {
+///     let mut coroutine = #[coroutine] || {
 ///         yield 1;
 ///         "foo"
 ///     };
@@ -75,6 +76,7 @@ pub trait Coroutine<R = ()> {
     /// values which are allowed to be returned each time a coroutine yields.
     /// For example an iterator-as-a-coroutine would likely have this type as
     /// `T`, the type being iterated over.
+    #[lang = "coroutine_yield"]
     type Yield;
 
     /// The type of value this coroutine returns.
@@ -83,6 +85,7 @@ pub trait Coroutine<R = ()> {
     /// `return` statement or implicitly as the last expression of a coroutine
     /// literal. For example futures would use this as `Result<T, E>` as it
     /// represents a completed future.
+    #[lang = "coroutine_return"]
     type Return;
 
     /// Resumes the execution of this coroutine.

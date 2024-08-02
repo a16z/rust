@@ -1,10 +1,11 @@
 use clippy_utils::diagnostics::{span_lint_and_sugg, span_lint_and_then};
 use clippy_utils::ty::implements_trait;
-use clippy_utils::{is_res_lang_ctor, last_path_segment, path_res, std_or_core};
+use clippy_utils::{is_from_proc_macro, is_res_lang_ctor, last_path_segment, path_res, std_or_core};
 use rustc_errors::Applicability;
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::{Expr, ExprKind, ImplItem, ImplItemKind, LangItem, Node, UnOp};
-use rustc_lint::{LateContext, LateLintPass};
+use rustc_lint::{LateContext, LateLintPass, LintContext};
+use rustc_middle::lint::in_external_macro;
 use rustc_middle::ty::EarlyBinder;
 use rustc_session::declare_lint_pass;
 use rustc_span::sym;
@@ -111,7 +112,7 @@ declare_lint_pass!(NonCanonicalImpls => [NON_CANONICAL_CLONE_IMPL, NON_CANONICAL
 
 impl LateLintPass<'_> for NonCanonicalImpls {
     #[expect(clippy::too_many_lines)]
-    fn check_impl_item(&mut self, cx: &LateContext<'_>, impl_item: &ImplItem<'_>) {
+    fn check_impl_item<'tcx>(&mut self, cx: &LateContext<'tcx>, impl_item: &ImplItem<'tcx>) {
         let Node::Item(item) = cx.tcx.parent_hir_node(impl_item.hir_id()) else {
             return;
         };
@@ -128,6 +129,9 @@ impl LateLintPass<'_> for NonCanonicalImpls {
         let ExprKind::Block(block, ..) = body.value.kind else {
             return;
         };
+        if in_external_macro(cx.sess(), block.span) || is_from_proc_macro(cx, impl_item) {
+            return;
+        }
 
         if cx.tcx.is_diagnostic_item(sym::Clone, trait_impl.def_id)
             && let Some(copy_def_id) = cx.tcx.get_diagnostic_item(sym::Copy)
@@ -182,17 +186,17 @@ impl LateLintPass<'_> for NonCanonicalImpls {
 
             if block.stmts.is_empty()
                 && let Some(expr) = block.expr
-                && let ExprKind::Call(
-                        Expr {
-                            kind: ExprKind::Path(some_path),
-                            hir_id: some_hir_id,
-                            ..
-                        },
-                        [cmp_expr],
-                    ) = expr.kind
-                && is_res_lang_ctor(cx, cx.qpath_res(some_path, *some_hir_id), LangItem::OptionSome)
-                // Fix #11178, allow `Self::cmp(self, ..)` too
-                && self_cmp_call(cx, cmp_expr, impl_item.owner_id.def_id, &mut needs_fully_qualified)
+                && expr_is_cmp(cx, &expr.kind, impl_item, &mut needs_fully_qualified)
+            {
+            }
+            // Fix #12683, allow [`needless_return`] here
+            else if block.expr.is_none()
+                && let Some(stmt) = block.stmts.first()
+                && let rustc_hir::StmtKind::Semi(Expr {
+                    kind: ExprKind::Ret(Some(Expr { kind: ret_kind, .. })),
+                    ..
+                }) = stmt.kind
+                && expr_is_cmp(cx, ret_kind, impl_item, &mut needs_fully_qualified)
             {
             } else {
                 // If `Self` and `Rhs` are not the same type, bail. This makes creating a valid
@@ -242,6 +246,30 @@ impl LateLintPass<'_> for NonCanonicalImpls {
                 );
             }
         }
+    }
+}
+
+/// Return true if `expr_kind` is a `cmp` call.
+fn expr_is_cmp<'tcx>(
+    cx: &LateContext<'tcx>,
+    expr_kind: &'tcx ExprKind<'tcx>,
+    impl_item: &ImplItem<'_>,
+    needs_fully_qualified: &mut bool,
+) -> bool {
+    if let ExprKind::Call(
+        Expr {
+            kind: ExprKind::Path(some_path),
+            hir_id: some_hir_id,
+            ..
+        },
+        [cmp_expr],
+    ) = expr_kind
+    {
+        is_res_lang_ctor(cx, cx.qpath_res(some_path, *some_hir_id), LangItem::OptionSome)
+            // Fix #11178, allow `Self::cmp(self, ..)` too
+            && self_cmp_call(cx, cmp_expr, impl_item.owner_id.def_id, needs_fully_qualified)
+    } else {
+        false
     }
 }
 

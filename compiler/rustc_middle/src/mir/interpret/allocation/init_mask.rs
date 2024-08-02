@@ -1,10 +1,10 @@
 #[cfg(test)]
 mod tests;
 
-use std::hash;
-use std::iter;
 use std::ops::Range;
+use std::{hash, iter};
 
+use rustc_macros::{HashStable, TyDecodable, TyEncodable};
 use rustc_serialize::{Decodable, Encodable};
 use rustc_target::abi::Size;
 use rustc_type_ir::{TyDecoder, TyEncoder};

@@ -6,7 +6,8 @@ type Bar = impl Sized;
 
 impl Foo {
     fn foo(self: Bar) {}
-    //~^ ERROR: invalid `self` parameter type: Bar
+    //~^ ERROR: invalid `self` parameter type: `Bar`
+    //~| ERROR: item does not constrain
 }
 
 fn main() {}

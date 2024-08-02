@@ -6,7 +6,7 @@ use parser::{SyntaxKind, T};
 
 use crate::{
     algo::{self, neighbor},
-    ast::{self, edit::IndentLevel, make, HasGenericParams},
+    ast::{self, edit::IndentLevel, make, HasGenericArgs, HasGenericParams},
     ted::{self, Position},
     AstNode, AstToken, Direction, SyntaxElement,
     SyntaxKind::{ATTR, COMMENT, WHITESPACE},
@@ -1054,6 +1054,7 @@ impl<N: AstNode + Clone> Indent for N {}
 mod tests {
     use std::fmt;
 
+    use parser::Edition;
     use stdx::trim_indent;
     use test_utils::assert_eq_text;
 
@@ -1062,7 +1063,7 @@ mod tests {
     use super::*;
 
     fn ast_mut_from_text<N: AstNode>(text: &str) -> N {
-        let parse = SourceFile::parse(text);
+        let parse = SourceFile::parse(text, Edition::CURRENT);
         parse.tree().syntax().descendants().find_map(N::cast).unwrap().clone_for_update()
     }
 

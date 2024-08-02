@@ -4,10 +4,10 @@ pub fn target() -> Target {
     Target {
         llvm_target: "aarch64-unknown-unknown".into(),
         metadata: crate::spec::TargetMetadata {
-            description: None,
-            tier: None,
-            host_tools: None,
-            std: None,
+            description: Some("ARM64 QNX Neutrino 7.1 RTOS".into()),
+            tier: Some(3),
+            host_tools: Some(false),
+            std: Some(true),
         },
         pointer_width: 64,
         // from: https://llvm.org/docs/LangRef.html#data-layout
@@ -19,7 +19,7 @@ pub fn target() -> Target {
         // i128:128  = 128-bit-integer, minimum_alignment=128, preferred_alignment=128
         // n32:64    = 32 and 64 are native integer widths; Elements of this set are considered to support most general arithmetic operations efficiently.
         // S128      = 128 bits are the natural alignment of the stack in bits.
-        data_layout: "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128".into(),
+        data_layout: "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32".into(),
         arch: "aarch64".into(),
         options: TargetOptions {
             features: "+v8a".into(),

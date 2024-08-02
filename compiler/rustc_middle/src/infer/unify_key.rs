@@ -1,10 +1,11 @@
-use crate::ty::{self, Ty, TyCtxt};
-use rustc_data_structures::unify::{NoError, UnifyKey, UnifyValue};
-use rustc_span::def_id::DefId;
-use rustc_span::symbol::Symbol;
-use rustc_span::Span;
 use std::cmp;
 use std::marker::PhantomData;
+
+use rustc_data_structures::unify::{NoError, UnifyKey, UnifyValue};
+use rustc_span::def_id::DefId;
+use rustc_span::Span;
+
+use crate::ty::{self, Ty, TyCtxt};
 
 pub trait ToType {
     fn to_type<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Ty<'tcx>;
@@ -87,35 +88,15 @@ impl<'tcx> UnifyValue for RegionVariableValue<'tcx> {
     }
 }
 
-impl ToType for ty::IntVarValue {
-    fn to_type<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
-        match *self {
-            ty::IntType(i) => Ty::new_int(tcx, i),
-            ty::UintType(i) => Ty::new_uint(tcx, i),
-        }
-    }
-}
-
-impl ToType for ty::FloatVarValue {
-    fn to_type<'tcx>(&self, tcx: TyCtxt<'tcx>) -> Ty<'tcx> {
-        Ty::new_float(tcx, self.0)
-    }
-}
-
 // Generic consts.
 
 #[derive(Copy, Clone, Debug)]
 pub struct ConstVariableOrigin {
-    pub kind: ConstVariableOriginKind,
     pub span: Span,
-}
-
-/// Reasons to create a const inference variable
-#[derive(Copy, Clone, Debug)]
-pub enum ConstVariableOriginKind {
-    MiscVariable,
-    ConstInference,
-    ConstParameterDefinition(Symbol, DefId),
+    /// `DefId` of the const parameter this was instantiated for, if any.
+    ///
+    /// This should only be used for diagnostics.
+    pub param_def_id: Option<DefId>,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -217,6 +198,7 @@ impl<'tcx> EffectVarValue<'tcx> {
 
 impl<'tcx> UnifyValue for EffectVarValue<'tcx> {
     type Error = NoError;
+
     fn unify_values(value1: &Self, value2: &Self) -> Result<Self, Self::Error> {
         match (*value1, *value2) {
             (EffectVarValue::Unknown, EffectVarValue::Unknown) => Ok(EffectVarValue::Unknown),

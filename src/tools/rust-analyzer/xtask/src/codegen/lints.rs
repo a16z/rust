@@ -6,8 +6,9 @@ use stdx::format_to;
 use xshell::{cmd, Shell};
 
 use crate::{
-    codegen::{add_preamble, ensure_file_contents, list_files, reformat},
+    codegen::{add_preamble, ensure_file_contents, reformat},
     project_root,
+    util::list_files,
 };
 
 const DESTINATION: &str = "crates/ide-db/src/generated/lints.rs";
@@ -28,7 +29,7 @@ pub(crate) fn generate(check: bool) {
     cmd!(
         sh,
         "git -C {rust_repo} submodule update --init --recursive --depth=1 --
-         compiler library src/tools"
+         compiler library src/tools src/doc/book"
     )
     .run()
     .unwrap();
@@ -73,10 +74,15 @@ pub struct LintGroup {
     .unwrap();
     generate_descriptor_clippy(&mut contents, &lints_json);
 
-    let contents = add_preamble("sourcegen_lints", reformat(contents));
+    let contents = add_preamble(crate::flags::CodegenType::LintDefinitions, reformat(contents));
 
     let destination = project_root().join(DESTINATION);
-    ensure_file_contents(destination.as_path(), &contents, check);
+    ensure_file_contents(
+        crate::flags::CodegenType::LintDefinitions,
+        destination.as_path(),
+        &contents,
+        check,
+    );
 }
 
 /// Parses the output of `rustdoc -Whelp` and prints `Lint` and `LintGroup` constants into `buf`.
@@ -280,7 +286,7 @@ fn generate_descriptor_clippy(buf: &mut String, path: &Path) {
             let line = &line[..up_to];
 
             let clippy_lint = clippy_lints.last_mut().expect("clippy lint must already exist");
-            clippy_lint.help = unescape(line).trim().to_owned();
+            unescape(line).trim().clone_into(&mut clippy_lint.help);
         }
     }
     clippy_lints.sort_by(|lint, lint2| lint.id.cmp(&lint2.id));

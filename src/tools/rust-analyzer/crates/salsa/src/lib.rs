@@ -1,8 +1,7 @@
-//!
 #![allow(clippy::type_complexity)]
 #![allow(clippy::question_mark)]
+#![allow(missing_docs)]
 #![warn(rust_2018_idioms)]
-#![warn(missing_docs)]
 
 //! The salsa crate is a crate for incremental recomputation.  It
 //! permits you to define a "database" of queries with both inputs and
@@ -11,6 +10,7 @@
 //! from previous invocations as appropriate.
 
 mod derived;
+mod derived_lru;
 mod durability;
 mod hash;
 mod input;
@@ -41,7 +41,7 @@ use std::panic::{self, UnwindSafe};
 
 pub use crate::durability::Durability;
 pub use crate::intern_id::InternId;
-pub use crate::interned::{InternKey, InternValue};
+pub use crate::interned::{InternKey, InternValue, InternValueTrivial};
 pub use crate::runtime::Runtime;
 pub use crate::runtime::RuntimeId;
 pub use crate::storage::Storage;
@@ -124,9 +124,9 @@ pub struct Event {
 impl Event {
     /// Returns a type that gives a user-readable debug output.
     /// Use like `println!("{:?}", index.debug(db))`.
-    pub fn debug<'me, D: ?Sized>(&'me self, db: &'me D) -> impl std::fmt::Debug + 'me
+    pub fn debug<'me, D>(&'me self, db: &'me D) -> impl std::fmt::Debug + 'me
     where
-        D: plumbing::DatabaseOps,
+        D: ?Sized + plumbing::DatabaseOps,
     {
         EventDebug { event: self, db }
     }
@@ -206,9 +206,9 @@ pub enum EventKind {
 impl EventKind {
     /// Returns a type that gives a user-readable debug output.
     /// Use like `println!("{:?}", index.debug(db))`.
-    pub fn debug<'me, D: ?Sized>(&'me self, db: &'me D) -> impl std::fmt::Debug + 'me
+    pub fn debug<'me, D>(&'me self, db: &'me D) -> impl std::fmt::Debug + 'me
     where
-        D: plumbing::DatabaseOps,
+        D: ?Sized + plumbing::DatabaseOps,
     {
         EventKindDebug { kind: self, db }
     }
@@ -285,7 +285,7 @@ pub trait ParallelDatabase: Database + Send {
     /// series of queries in parallel and arranging the results. Using
     /// this method for that purpose ensures that those queries will
     /// see a consistent view of the database (it is also advisable
-    /// for those queries to use the [`Runtime::unwind_if_cancelled`]
+    /// for those queries to use the [`Database::unwind_if_cancelled`]
     /// method to check for cancellation).
     ///
     /// # Panics
@@ -400,9 +400,9 @@ impl DatabaseKeyIndex {
 
     /// Returns a type that gives a user-readable debug output.
     /// Use like `println!("{:?}", index.debug(db))`.
-    pub fn debug<D: ?Sized>(self, db: &D) -> impl std::fmt::Debug + '_
+    pub fn debug<D>(self, db: &D) -> impl std::fmt::Debug + '_
     where
-        D: plumbing::DatabaseOps,
+        D: ?Sized + plumbing::DatabaseOps,
     {
         DatabaseKeyIndexDebug { index: self, db }
     }
@@ -444,7 +444,7 @@ pub trait QueryDb<'d>: Sized {
 /// Trait implements by all of the "special types" associated with
 /// each of your queries.
 pub trait Query: Debug + Default + Sized + for<'d> QueryDb<'d> {
-    /// Type that you you give as a parameter -- for queries with zero
+    /// Type that you give as a parameter -- for queries with zero
     /// or more than one input, this will be a tuple.
     type Key: Clone + Debug + Hash + Eq;
 
@@ -514,6 +514,10 @@ where
     {
         self.storage.purge();
     }
+
+    pub fn storage(&self) -> &<Q as Query>::Storage {
+        self.storage
+    }
 }
 
 /// Return value from [the `query_mut` method] on `Database`.
@@ -574,7 +578,7 @@ where
     /// cost of potential extra recalculations of evicted values.
     ///
     /// If `cap` is zero, all values are preserved, this is the default.
-    pub fn set_lru_capacity(&self, cap: usize)
+    pub fn set_lru_capacity(&self, cap: u16)
     where
         Q::Storage: plumbing::LruQueryStorageOps,
     {

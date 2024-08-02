@@ -90,7 +90,7 @@ fn expr_type_certainty(cx: &LateContext<'_>, expr: &Expr<'_>) -> Certainty {
     if let Some(def_id) = adt_def_id(expr_ty) {
         certainty.with_def_id(def_id)
     } else {
-        certainty
+        certainty.clear_def_id()
     }
 }
 
@@ -176,7 +176,7 @@ fn qpath_certainty(cx: &LateContext<'_>, qpath: &QPath<'_>, resolves_to_type: bo
             .get(*lang_item)
             .map_or(Certainty::Uncertain, |def_id| {
                 let generics = cx.tcx.generics_of(def_id);
-                if generics.parent_count == 0 && generics.params.is_empty() {
+                if generics.is_empty() {
                     Certainty::Certain(if resolves_to_type { Some(def_id) } else { None })
                 } else {
                     Certainty::Uncertain
@@ -206,8 +206,18 @@ fn path_segment_certainty(
             // Checking `res_generics_def_id(..)` before calling `generics_of` avoids an ICE.
             if cx.tcx.res_generics_def_id(path_segment.res).is_some() {
                 let generics = cx.tcx.generics_of(def_id);
-                let count = generics.params.len() - usize::from(generics.host_effect_index.is_some());
-                let lhs = if (parent_certainty.is_certain() || generics.parent_count == 0) && count == 0 {
+
+                let own_count = generics.own_params.len()
+                    - usize::from(generics.host_effect_index.is_some_and(|index| {
+                        // Check that the host index actually belongs to this resolution.
+                        // E.g. for `Add::add`, host_effect_index is `Some(2)`, but it's part of the parent `Add`
+                        // trait's generics.
+                        // Add params:      [Self#0, Rhs#1, host#2]   parent_count=0, count=3
+                        // Add::add params: []                        parent_count=3, count=3
+                        // (3..3).contains(&host_effect_index) => false
+                        (generics.parent_count..generics.count()).contains(&index)
+                    }));
+                let lhs = if (parent_certainty.is_certain() || generics.parent_count == 0) && own_count == 0 {
                     Certainty::Certain(None)
                 } else {
                     Certainty::Uncertain
@@ -271,7 +281,7 @@ fn update_res(cx: &LateContext<'_>, parent_certainty: Certainty, path_segment: &
     {
         let mut def_path = cx.get_def_path(def_id);
         def_path.push(path_segment.ident.name);
-        let reses = def_path_res(cx, &def_path.iter().map(Symbol::as_str).collect::<Vec<_>>());
+        let reses = def_path_res(cx.tcx, &def_path.iter().map(Symbol::as_str).collect::<Vec<_>>());
         if let [res] = reses.as_slice() { Some(*res) } else { None }
     } else {
         None
@@ -299,7 +309,7 @@ fn type_is_inferable_from_arguments(cx: &LateContext<'_>, expr: &Expr<'_>) -> bo
     let fn_sig = cx.tcx.fn_sig(callee_def_id).skip_binder();
 
     // Check that all type parameters appear in the functions input types.
-    (0..(generics.parent_count + generics.params.len()) as u32).all(|index| {
+    (0..(generics.parent_count + generics.own_params.len()) as u32).all(|index| {
         Some(index as usize) == generics.host_effect_index
             || fn_sig
                 .inputs()

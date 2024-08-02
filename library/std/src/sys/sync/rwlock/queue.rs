@@ -111,10 +111,8 @@ use crate::cell::OnceCell;
 use crate::hint::spin_loop;
 use crate::mem;
 use crate::ptr::{self, null_mut, without_provenance_mut, NonNull};
-use crate::sync::atomic::{
-    AtomicBool, AtomicPtr,
-    Ordering::{AcqRel, Acquire, Relaxed, Release},
-};
+use crate::sync::atomic::Ordering::{AcqRel, Acquire, Relaxed, Release};
+use crate::sync::atomic::{AtomicBool, AtomicPtr};
 use crate::thread::{self, Thread};
 
 // Locking uses exponential backoff. `SPIN_COUNT` indicates how many times the
@@ -186,7 +184,7 @@ struct Node {
 }
 
 impl Node {
-    /// Create a new queue node.
+    /// Creates a new queue node.
     fn new(write: bool) -> Node {
         Node {
             next: AtomicLink::new(None),
@@ -202,7 +200,7 @@ impl Node {
     fn prepare(&mut self) {
         // Fall back to creating an unnamed `Thread` handle to allow locking in
         // TLS destructors.
-        self.thread.get_or_init(|| thread::try_current().unwrap_or_else(|| Thread::new(None)));
+        self.thread.get_or_init(|| thread::try_current().unwrap_or_else(Thread::new_unnamed));
         self.completed = AtomicBool::new(false);
     }
 

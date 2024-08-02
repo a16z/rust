@@ -14,9 +14,9 @@ use syntax::{
         edit_in_place::{AttrsOwnerEdit, Indent, Removable},
         make, HasArgList, HasAttrs, HasGenericParams, HasName, HasTypeBounds, Whitespace,
     },
-    ted, AstNode, AstToken, Direction, SourceFile,
+    ted, AstNode, AstToken, Direction, NodeOrToken, SourceFile,
     SyntaxKind::*,
-    SyntaxNode, TextRange, TextSize, T,
+    SyntaxNode, SyntaxToken, TextRange, TextSize, T,
 };
 
 use crate::assist_context::{AssistContext, SourceChangeBuilder};
@@ -71,7 +71,7 @@ pub fn extract_trivial_expression(block_expr: &ast::BlockExpr) -> Option<ast::Ex
 ///
 /// It may produce false positives, for example, `#[wasm_bindgen_test]` requires a different command to run the test,
 /// but it's better than not to have the runnables for the tests at all.
-pub fn test_related_attribute(fn_def: &ast::Fn) -> Option<ast::Attr> {
+pub fn test_related_attribute_syn(fn_def: &ast::Fn) -> Option<ast::Attr> {
     fn_def.attrs().find_map(|attr| {
         let path = attr.path()?;
         let text = path.syntax().text().to_string();
@@ -80,6 +80,19 @@ pub fn test_related_attribute(fn_def: &ast::Fn) -> Option<ast::Attr> {
         } else {
             None
         }
+    })
+}
+
+pub fn has_test_related_attribute(attrs: &hir::AttrsWithOwner) -> bool {
+    attrs.iter().any(|attr| {
+        let path = attr.path();
+        (|| {
+            Some(
+                path.segments().first()?.as_str().starts_with("test")
+                    || path.segments().last()?.as_str().ends_with("test"),
+            )
+        })()
+        .unwrap_or_default()
     })
 }
 
@@ -902,4 +915,47 @@ pub(crate) fn replace_record_field_expr(
         let file_range = ctx.sema.original_range(expr.syntax());
         edit.replace(file_range.range, initializer.syntax().text());
     }
+}
+
+/// Creates a token tree list from a syntax node, creating the needed delimited sub token trees.
+/// Assumes that the input syntax node is a valid syntax tree.
+pub(crate) fn tt_from_syntax(node: SyntaxNode) -> Vec<NodeOrToken<ast::TokenTree, SyntaxToken>> {
+    let mut tt_stack = vec![(None, vec![])];
+
+    for element in node.descendants_with_tokens() {
+        let NodeOrToken::Token(token) = element else { continue };
+
+        match token.kind() {
+            T!['('] | T!['{'] | T!['['] => {
+                // Found an opening delimiter, start a new sub token tree
+                tt_stack.push((Some(token.kind()), vec![]));
+            }
+            T![')'] | T!['}'] | T![']'] => {
+                // Closing a subtree
+                let (delimiter, tt) = tt_stack.pop().expect("unbalanced delimiters");
+                let (_, parent_tt) = tt_stack
+                    .last_mut()
+                    .expect("parent token tree was closed before it was completed");
+                let closing_delimiter = delimiter.map(|it| match it {
+                    T!['('] => T![')'],
+                    T!['{'] => T!['}'],
+                    T!['['] => T![']'],
+                    _ => unreachable!(),
+                });
+                stdx::always!(
+                    closing_delimiter == Some(token.kind()),
+                    "mismatched opening and closing delimiters"
+                );
+
+                let sub_tt = make::token_tree(delimiter.expect("unbalanced delimiters"), tt);
+                parent_tt.push(NodeOrToken::Node(sub_tt));
+            }
+            _ => {
+                let (_, current_tt) = tt_stack.last_mut().expect("unmatched delimiters");
+                current_tt.push(NodeOrToken::Token(token))
+            }
+        }
+    }
+
+    tt_stack.pop().expect("parent token tree was closed before it was completed").1
 }

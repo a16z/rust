@@ -6,7 +6,7 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{bail, format_err};
+use anyhow::format_err;
 use xshell::{cmd, Shell};
 
 use crate::flags::{self, MeasurementType};
@@ -64,7 +64,7 @@ impl flags::Metrics {
         };
 
         let mut file =
-            fs::File::options().write(true).create(true).open(format!("target/{}.json", name))?;
+            fs::File::options().write(true).create(true).open(format!("target/{name}.json"))?;
         writeln!(file, "{}", metrics.json())?;
         eprintln!("{metrics:#?}");
         Ok(())
@@ -193,7 +193,7 @@ impl Metrics {
 impl Host {
     fn new(sh: &Shell) -> anyhow::Result<Host> {
         if cfg!(not(target_os = "linux")) {
-            bail!("can only collect metrics on Linux ");
+            return Ok(Host { os: "unknown".into(), cpu: "unknown".into(), mem: "unknown".into() });
         }
 
         let os = read_field(sh, "/etc/os-release", "PRETTY_NAME=")?.trim_matches('"').to_owned();

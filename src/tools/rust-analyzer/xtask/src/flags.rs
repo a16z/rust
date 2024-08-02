@@ -1,8 +1,8 @@
 #![allow(unreachable_pub)]
 
-use std::str::FromStr;
+use std::{fmt, str::FromStr};
 
-use crate::install::{ClientOpt, ServerOpt};
+use crate::install::{ClientOpt, ProcMacroServerOpt, ServerOpt};
 
 xflags::xflags! {
     src "./src/flags.rs"
@@ -14,16 +14,20 @@ xflags::xflags! {
         cmd install {
             /// Install only VS Code plugin.
             optional --client
-            /// One of 'code', 'code-exploration', 'code-insiders', 'codium', or 'code-oss'.
+            /// One of `code`, `code-exploration`, `code-insiders`, `codium`, or `code-oss`.
             optional --code-bin name: String
 
             /// Install only the language server.
             optional --server
-            /// Use mimalloc allocator for server
+            /// Use mimalloc allocator for server.
             optional --mimalloc
-            /// Use jemalloc allocator for server
+            /// Use jemalloc allocator for server.
             optional --jemalloc
-            /// build in release with debug info set to 2
+
+            /// Install the proc-macro server.
+            optional --proc-macro-server
+
+            /// build in release with debug info set to 2.
             optional --dev-rel
         }
 
@@ -32,9 +36,21 @@ xflags::xflags! {
         cmd release {
             optional --dry-run
         }
-        cmd promote {
-            optional --dry-run
+
+        cmd rustc-pull {
+            /// rustc commit to pull.
+            optional --commit refspec: String
         }
+
+        cmd rustc-push {
+            /// rust local path, e.g. `../rust-rust-analyzer`.
+            required --rust-path rust_path: String
+            /// rust fork name, e.g.  `matklad/rust`.
+            required --rust-fork rust_fork: String
+            /// branch name.
+            optional --branch branch: String
+        }
+
         cmd dist {
             /// Use mimalloc allocator for server
             optional --mimalloc
@@ -61,6 +77,8 @@ xflags::xflags! {
             optional codegen_type: CodegenType
             optional --check
         }
+
+        cmd tidy {}
     }
 }
 
@@ -77,19 +95,25 @@ pub enum XtaskCmd {
     Install(Install),
     FuzzTests(FuzzTests),
     Release(Release),
-    Promote(Promote),
+    RustcPull(RustcPull),
+    RustcPush(RustcPush),
     Dist(Dist),
     PublishReleaseNotes(PublishReleaseNotes),
     Metrics(Metrics),
     Bb(Bb),
     Codegen(Codegen),
+    Tidy(Tidy),
 }
+
+#[derive(Debug)]
+pub struct Tidy {}
 
 #[derive(Debug)]
 pub struct Install {
     pub client: bool,
     pub code_bin: Option<String>,
     pub server: bool,
+    pub proc_macro_server: bool,
     pub mimalloc: bool,
     pub jemalloc: bool,
     pub dev_rel: bool,
@@ -104,8 +128,15 @@ pub struct Release {
 }
 
 #[derive(Debug)]
-pub struct Promote {
-    pub dry_run: bool,
+pub struct RustcPull {
+    pub commit: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct RustcPush {
+    pub rust_path: String,
+    pub rust_fork: String,
+    pub branch: Option<String>,
 }
 
 #[derive(Debug)]
@@ -165,6 +196,22 @@ pub enum CodegenType {
     AssistsDocTests,
     DiagnosticsDocs,
     LintDefinitions,
+    ParserTests,
+    FeatureDocs,
+}
+
+impl fmt::Display for CodegenType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::All => write!(f, "all"),
+            Self::Grammar => write!(f, "grammar"),
+            Self::AssistsDocTests => write!(f, "assists-doc-tests"),
+            Self::DiagnosticsDocs => write!(f, "diagnostics-docs"),
+            Self::LintDefinitions => write!(f, "lint-definitions"),
+            Self::ParserTests => write!(f, "parser-tests"),
+            Self::FeatureDocs => write!(f, "feature-docs"),
+        }
+    }
 }
 
 impl FromStr for CodegenType {
@@ -175,7 +222,9 @@ impl FromStr for CodegenType {
             "grammar" => Ok(Self::Grammar),
             "assists-doc-tests" => Ok(Self::AssistsDocTests),
             "diagnostics-docs" => Ok(Self::DiagnosticsDocs),
-            "lints-definitions" => Ok(Self::LintDefinitions),
+            "lint-definitions" => Ok(Self::LintDefinitions),
+            "parser-tests" => Ok(Self::ParserTests),
+            "feature-docs" => Ok(Self::FeatureDocs),
             _ => Err("Invalid option".to_owned()),
         }
     }
@@ -240,7 +289,7 @@ impl Malloc {
 
 impl Install {
     pub(crate) fn server(&self) -> Option<ServerOpt> {
-        if self.client && !self.server {
+        if (self.client || self.proc_macro_server) && !self.server {
             return None;
         }
         let malloc = if self.mimalloc {
@@ -252,8 +301,14 @@ impl Install {
         };
         Some(ServerOpt { malloc, dev_rel: self.dev_rel })
     }
+    pub(crate) fn proc_macro_server(&self) -> Option<ProcMacroServerOpt> {
+        if !self.proc_macro_server {
+            return None;
+        }
+        Some(ProcMacroServerOpt { dev_rel: self.dev_rel })
+    }
     pub(crate) fn client(&self) -> Option<ClientOpt> {
-        if !self.client && self.server {
+        if (self.server || self.proc_macro_server) && !self.client {
             return None;
         }
         Some(ClientOpt { code_bin: self.code_bin.clone() })

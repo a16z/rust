@@ -1,3 +1,4 @@
+//@ compile-flags: -C debuginfo=full
 // Verify that we do not ICE inlining a function which uses _0 as an index.
 // EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 
@@ -18,11 +19,7 @@ fn inner() -> usize {
     // CHECK: = {{.*}}[_0];
     let buffer = &[true];
     let index = index();
-    if buffer[index] {
-        index
-    } else {
-        0
-    }
+    if buffer[index] { index } else { 0 }
 }
 
 fn main() {

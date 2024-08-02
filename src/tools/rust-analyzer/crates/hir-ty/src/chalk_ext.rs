@@ -1,6 +1,8 @@
 //! Various extensions traits for Chalk types.
 
-use chalk_ir::{cast::Cast, FloatTy, IntTy, Mutability, Scalar, TyVariableKind, UintTy};
+use chalk_ir::{
+    cast::Cast, FloatTy, IntTy, Mutability, Scalar, TyVariableKind, TypeOutlives, UintTy,
+};
 use hir_def::{
     builtin_type::{BuiltinFloat, BuiltinInt, BuiltinType, BuiltinUint},
     generics::TypeOrConstParamData,
@@ -10,12 +12,10 @@ use hir_def::{
 };
 
 use crate::{
-    db::HirDatabase,
-    from_assoc_type_id, from_chalk_trait_id, from_foreign_def_id, from_placeholder_idx,
-    to_chalk_trait_id,
-    utils::{generics, ClosureSubst},
-    AdtId, AliasEq, AliasTy, Binders, CallableDefId, CallableSig, Canonical, CanonicalVarKinds,
-    ClosureId, DynTy, FnPointer, ImplTraitId, InEnvironment, Interner, Lifetime, ProjectionTy,
+    db::HirDatabase, from_assoc_type_id, from_chalk_trait_id, from_foreign_def_id,
+    from_placeholder_idx, generics::generics, to_chalk_trait_id, utils::ClosureSubst, AdtId,
+    AliasEq, AliasTy, Binders, CallableDefId, CallableSig, Canonical, CanonicalVarKinds, ClosureId,
+    DynTy, FnPointer, ImplTraitId, InEnvironment, Interner, Lifetime, ProjectionTy,
     QuantifiedWhereClause, Substitution, TraitRef, Ty, TyBuilder, TyKind, TypeFlags, WhereClause,
 };
 
@@ -25,6 +25,7 @@ pub trait TyExt {
     fn is_scalar(&self) -> bool;
     fn is_floating_point(&self) -> bool;
     fn is_never(&self) -> bool;
+    fn is_str(&self) -> bool;
     fn is_unknown(&self) -> bool;
     fn contains_unknown(&self) -> bool;
     fn is_ty_var(&self) -> bool;
@@ -85,6 +86,10 @@ impl TyExt for Ty {
         matches!(self.kind(Interner), TyKind::Never)
     }
 
+    fn is_str(&self) -> bool {
+        matches!(self.kind(Interner), TyKind::Str)
+    }
+
     fn is_unknown(&self) -> bool {
         matches!(self.kind(Interner), TyKind::Error)
     }
@@ -114,8 +119,10 @@ impl TyExt for Ty {
             TyKind::Scalar(Scalar::Bool) => Some(BuiltinType::Bool),
             TyKind::Scalar(Scalar::Char) => Some(BuiltinType::Char),
             TyKind::Scalar(Scalar::Float(fty)) => Some(BuiltinType::Float(match fty {
+                FloatTy::F128 => BuiltinFloat::F128,
                 FloatTy::F64 => BuiltinFloat::F64,
                 FloatTy::F32 => BuiltinFloat::F32,
+                FloatTy::F16 => BuiltinFloat::F16,
             })),
             TyKind::Scalar(Scalar::Int(ity)) => Some(BuiltinType::Int(match ity {
                 IntTy::Isize => BuiltinInt::Isize,
@@ -183,9 +190,10 @@ impl TyExt for Ty {
     fn as_generic_def(&self, db: &dyn HirDatabase) -> Option<GenericDefId> {
         match *self.kind(Interner) {
             TyKind::Adt(AdtId(adt), ..) => Some(adt.into()),
-            TyKind::FnDef(callable, ..) => {
-                Some(db.lookup_intern_callable_def(callable.into()).into())
-            }
+            TyKind::FnDef(callable, ..) => Some(GenericDefId::from_callable(
+                db.upcast(),
+                db.lookup_intern_callable_def(callable.into()),
+            )),
             TyKind::AssociatedType(type_alias, ..) => Some(from_assoc_type_id(type_alias).into()),
             TyKind::Foreign(type_alias, ..) => Some(from_foreign_def_id(type_alias).into()),
             _ => None,
@@ -303,7 +311,7 @@ impl TyExt for Ty {
             TyKind::Placeholder(idx) => {
                 let id = from_placeholder_idx(db, *idx);
                 let generic_params = db.generic_params(id.parent);
-                let param_data = &generic_params.type_or_consts[id.local_id];
+                let param_data = &generic_params[id.local_id];
                 match param_data {
                     TypeOrConstParamData::TypeParamData(p) => match p.provenance {
                         hir_def::generics::TypeParamProvenance::ArgumentImplTrait => {
@@ -312,7 +320,7 @@ impl TyExt for Ty {
                                 .generic_predicates(id.parent)
                                 .iter()
                                 .map(|pred| pred.clone().substitute(Interner, &substs))
-                                .filter(|wc| match &wc.skip_binders() {
+                                .filter(|wc| match wc.skip_binders() {
                                     WhereClause::Implemented(tr) => {
                                         &tr.self_type_parameter(Interner) == self
                                     }
@@ -320,6 +328,9 @@ impl TyExt for Ty {
                                         alias: AliasTy::Projection(proj),
                                         ty: _,
                                     }) => &proj.self_type_parameter(db) == self,
+                                    WhereClause::TypeOutlives(TypeOutlives { ty, lifetime: _ }) => {
+                                        ty == self
+                                    }
                                     _ => false,
                                 })
                                 .collect::<Vec<_>>();

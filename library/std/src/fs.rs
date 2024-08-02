@@ -50,7 +50,7 @@ use crate::time::SystemTime;
 /// }
 /// ```
 ///
-/// Read the contents of a file into a [`String`] (you can also use [`read`]):
+/// Reads the contents of a file into a [`String`] (you can also use [`read`]):
 ///
 /// ```no_run
 /// use std::fs::File;
@@ -214,7 +214,7 @@ pub struct Permissions(fs_imp::FilePermissions);
 /// A structure representing a type of file with accessors for each file type.
 /// It is returned by [`Metadata::file_type`] method.
 #[stable(feature = "file_type", since = "1.1.0")]
-#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(not(test), rustc_diagnostic_item = "FileType")]
 pub struct FileType(fs_imp::FileType);
 
@@ -229,7 +229,7 @@ pub struct DirBuilder {
     recursive: bool,
 }
 
-/// Read the entire contents of a file into a bytes vector.
+/// Reads the entire contents of a file into a bytes vector.
 ///
 /// This is a convenience function for using [`File::open`] and [`read_to_end`]
 /// with fewer imports and without an intermediate variable.
@@ -268,7 +268,7 @@ pub fn read<P: AsRef<Path>>(path: P) -> io::Result<Vec<u8>> {
     inner(path.as_ref())
 }
 
-/// Read the entire contents of a file into a string.
+/// Reads the entire contents of a file into a string.
 ///
 /// This is a convenience function for using [`File::open`] and [`read_to_string`]
 /// with fewer imports and without an intermediate variable.
@@ -311,7 +311,7 @@ pub fn read_to_string<P: AsRef<Path>>(path: P) -> io::Result<String> {
     inner(path.as_ref())
 }
 
-/// Write a slice as the entire contents of a file.
+/// Writes a slice as the entire contents of a file.
 ///
 /// This function will create a file if it does not exist,
 /// and will entirely replace its contents if it does.
@@ -408,6 +408,9 @@ impl File {
     ///
     /// This function will create a file if it does not exist, or return an error if it does. This
     /// way, if the call succeeds, the file returned is guaranteed to be new.
+    /// If a file exists at the target location, creating a new file will fail with [`AlreadyExists`]
+    /// or another error based on the situation. See [`OpenOptions::open`] for a
+    /// non-exhaustive list of likely errors.
     ///
     /// This option is useful because it is atomic. Otherwise between checking whether a file
     /// exists and creating a new one, the file may have been created by another process (a TOCTOU
@@ -415,6 +418,8 @@ impl File {
     ///
     /// This can also be written using
     /// `File::options().read(true).write(true).create_new(true).open(...)`.
+    ///
+    /// [`AlreadyExists`]: crate::io::ErrorKind::AlreadyExists
     ///
     /// # Examples
     ///
@@ -465,14 +470,20 @@ impl File {
         OpenOptions::new()
     }
 
-    /// Attempts to sync all OS-internal metadata to disk.
+    /// Attempts to sync all OS-internal file content and metadata to disk.
     ///
     /// This function will attempt to ensure that all in-memory data reaches the
     /// filesystem before returning.
     ///
     /// This can be used to handle errors that would otherwise only be caught
-    /// when the `File` is closed.  Dropping a file will ignore errors in
-    /// synchronizing this in-memory data.
+    /// when the `File` is closed, as dropping a `File` will ignore all errors.
+    /// Note, however, that `sync_all` is generally more expensive than closing
+    /// a file by dropping it, because the latter is not required to block until
+    /// the data has been written to the filesystem.
+    ///
+    /// If synchronizing the metadata is not required, use [`sync_data`] instead.
+    ///
+    /// [`sync_data`]: File::sync_data
     ///
     /// # Examples
     ///
@@ -489,6 +500,7 @@ impl File {
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[doc(alias = "fsync")]
     pub fn sync_all(&self) -> io::Result<()> {
         self.inner.fsync()
     }
@@ -520,6 +532,7 @@ impl File {
     /// }
     /// ```
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[doc(alias = "fdatasync")]
     pub fn sync_data(&self) -> io::Result<()> {
         self.inner.datasync()
     }
@@ -754,11 +767,33 @@ fn buffer_capacity_required(mut file: &File) -> Option<usize> {
 
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Read for &File {
+    /// Reads some bytes from the file.
+    ///
+    /// See [`Read::read`] docs for more info.
+    ///
+    /// # Platform-specific behavior
+    ///
+    /// This function currently corresponds to the `read` function on Unix and
+    /// the `NtReadFile` function on Windows. Note that this [may change in
+    /// the future][changes].
+    ///
+    /// [changes]: io#platform-specific-behavior
     #[inline]
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.inner.read(buf)
     }
 
+    /// Like `read`, except that it reads into a slice of buffers.
+    ///
+    /// See [`Read::read_vectored`] docs for more info.
+    ///
+    /// # Platform-specific behavior
+    ///
+    /// This function currently corresponds to the `readv` function on Unix and
+    /// falls back to the `read` implementation on Windows. Note that this
+    /// [may change in the future][changes].
+    ///
+    /// [changes]: io#platform-specific-behavior
     #[inline]
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut<'_>]) -> io::Result<usize> {
         self.inner.read_vectored(bufs)
@@ -769,6 +804,16 @@ impl Read for &File {
         self.inner.read_buf(cursor)
     }
 
+    /// Determines if `File` has an efficient `read_vectored` implementation.
+    ///
+    /// See [`Read::is_read_vectored`] docs for more info.
+    ///
+    /// # Platform-specific behavior
+    ///
+    /// This function currently returns `true` on Unix an `false` on Windows.
+    /// Note that this [may change in the future][changes].
+    ///
+    /// [changes]: io#platform-specific-behavior
     #[inline]
     fn is_read_vectored(&self) -> bool {
         self.inner.is_read_vectored()
@@ -790,19 +835,63 @@ impl Read for &File {
 }
 #[stable(feature = "rust1", since = "1.0.0")]
 impl Write for &File {
+    /// Writes some bytes from the file.
+    ///
+    /// See [`Write::write`] docs for more info.
+    ///
+    /// # Platform-specific behavior
+    ///
+    /// This function currently corresponds to the `write` function on Unix and
+    /// the `NtWriteFile` function on Windows. Note that this [may change in
+    /// the future][changes].
+    ///
+    /// [changes]: io#platform-specific-behavior
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.inner.write(buf)
     }
 
+    /// Like `write`, except that it writes into a slice of buffers.
+    ///
+    /// See [`Write::write_vectored`] docs for more info.
+    ///
+    /// # Platform-specific behavior
+    ///
+    /// This function currently corresponds to the `writev` function on Unix
+    /// and falls back to the `write` implementation on Windows. Note that this
+    /// [may change in the future][changes].
+    ///
+    /// [changes]: io#platform-specific-behavior
     fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
         self.inner.write_vectored(bufs)
     }
 
+    /// Determines if `File` has an efficient `write_vectored` implementation.
+    ///
+    /// See [`Write::is_write_vectored`] docs for more info.
+    ///
+    /// # Platform-specific behavior
+    ///
+    /// This function currently returns `true` on Unix an `false` on Windows.
+    /// Note that this [may change in the future][changes].
+    ///
+    /// [changes]: io#platform-specific-behavior
     #[inline]
     fn is_write_vectored(&self) -> bool {
         self.inner.is_write_vectored()
     }
 
+    /// Flushes the file, ensuring that all intermediately buffered contents
+    /// reach their destination.
+    ///
+    /// See [`Write::flush`] docs for more info.
+    ///
+    /// # Platform-specific behavior
+    ///
+    /// Since a `File` structure doesn't contain any buffers, this function is
+    /// currently a no-op on Unix and Windows. Note that this [may change in
+    /// the future][changes].
+    ///
+    /// [changes]: io#platform-specific-behavior
     #[inline]
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
@@ -972,20 +1061,26 @@ impl OpenOptions {
     /// Note that setting `.write(true).append(true)` has the same effect as
     /// setting only `.append(true)`.
     ///
-    /// For most filesystems, the operating system guarantees that all writes are
-    /// atomic: no writes get mangled because another process writes at the same
-    /// time.
+    /// Append mode guarantees that writes will be positioned at the current end of file,
+    /// even when there are other processes or threads appending to the same file. This is
+    /// unlike <code>[seek]\([SeekFrom]::[End]\(0))</code> followed by `write()`, which
+    /// has a race between seeking and writing during which another writer can write, with
+    /// our `write()` overwriting their data.
     ///
-    /// One maybe obvious note when using append-mode: make sure that all data
-    /// that belongs together is written to the file in one operation. This
-    /// can be done by concatenating strings before passing them to [`write()`],
-    /// or using a buffered writer (with a buffer of adequate size),
-    /// and calling [`flush()`] when the message is complete.
+    /// Keep in mind that this does not necessarily guarantee that data appended by
+    /// different processes or threads does not interleave. The amount of data accepted a
+    /// single `write()` call depends on the operating system and file system. A
+    /// successful `write()` is allowed to write only part of the given data, so even if
+    /// you're careful to provide the whole message in a single call to `write()`, there
+    /// is no guarantee that it will be written out in full. If you rely on the filesystem
+    /// accepting the message in a single write, make sure that all data that belongs
+    /// together is written in one operation. This can be done by concatenating strings
+    /// before passing them to [`write()`].
     ///
     /// If a file is opened with both read and append access, beware that after
     /// opening, and after every write, the position for reading may be set at the
     /// end of the file. So, before writing, save the current position (using
-    /// <code>[seek]\([SeekFrom]::[Current]\(0))</code>), and restore it before the next read.
+    /// <code>[Seek]::[stream_position]</code>), and restore it before the next read.
     ///
     /// ## Note
     ///
@@ -994,8 +1089,10 @@ impl OpenOptions {
     ///
     /// [`write()`]: Write::write "io::Write::write"
     /// [`flush()`]: Write::flush "io::Write::flush"
+    /// [stream_position]: Seek::stream_position "io::Seek::stream_position"
     /// [seek]: Seek::seek "io::Seek::seek"
     /// [Current]: SeekFrom::Current "io::SeekFrom::Current"
+    /// [End]: SeekFrom::End "io::SeekFrom::End"
     ///
     /// # Examples
     ///
@@ -1055,6 +1152,9 @@ impl OpenOptions {
     ///
     /// No file is allowed to exist at the target location, also no (dangling) symlink. In this
     /// way, if the call succeeds, the file returned is guaranteed to be new.
+    /// If a file exists at the target location, creating a new file will fail with [`AlreadyExists`]
+    /// or another error based on the situation. See [`OpenOptions::open`] for a
+    /// non-exhaustive list of likely errors.
     ///
     /// This option is useful because it is atomic. Otherwise between checking
     /// whether a file exists and creating a new one, the file may have been
@@ -1068,6 +1168,7 @@ impl OpenOptions {
     ///
     /// [`.create()`]: OpenOptions::create
     /// [`.truncate()`]: OpenOptions::truncate
+    /// [`AlreadyExists`]: io::ErrorKind::AlreadyExists
     ///
     /// # Examples
     ///
@@ -1394,15 +1495,20 @@ impl Metadata {
 #[stable(feature = "std_debug", since = "1.16.0")]
 impl fmt::Debug for Metadata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Metadata")
-            .field("file_type", &self.file_type())
-            .field("is_dir", &self.is_dir())
-            .field("is_file", &self.is_file())
-            .field("permissions", &self.permissions())
-            .field("modified", &self.modified())
-            .field("accessed", &self.accessed())
-            .field("created", &self.created())
-            .finish_non_exhaustive()
+        let mut debug = f.debug_struct("Metadata");
+        debug.field("file_type", &self.file_type());
+        debug.field("permissions", &self.permissions());
+        debug.field("len", &self.len());
+        if let Ok(modified) = self.modified() {
+            debug.field("modified", &modified);
+        }
+        if let Ok(accessed) = self.accessed() {
+            debug.field("accessed", &accessed);
+        }
+        if let Ok(created) = self.created() {
+            debug.field("created", &created);
+        }
+        debug.finish_non_exhaustive()
     }
 }
 
@@ -1420,7 +1526,7 @@ impl FromInner<fs_imp::FileAttr> for Metadata {
 }
 
 impl FileTimes {
-    /// Create a new `FileTimes` with no times set.
+    /// Creates a new `FileTimes` with no times set.
     ///
     /// Using the resulting `FileTimes` in [`File::set_times`] will not modify any timestamps.
     #[stable(feature = "file_set_times", since = "1.75.0")]
@@ -1668,6 +1774,17 @@ impl FileType {
     }
 }
 
+#[stable(feature = "std_debug", since = "1.16.0")]
+impl fmt::Debug for FileType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileType")
+            .field("is_file", &self.is_file())
+            .field("is_dir", &self.is_dir())
+            .field("is_symlink", &self.is_symlink())
+            .finish_non_exhaustive()
+    }
+}
+
 impl AsInner<fs_imp::FileType> for FileType {
     #[inline]
     fn as_inner(&self) -> &fs_imp::FileType {
@@ -1888,7 +2005,7 @@ pub fn remove_file<P: AsRef<Path>>(path: P) -> io::Result<()> {
     fs_imp::unlink(path.as_ref())
 }
 
-/// Given a path, query the file system to get information about a file,
+/// Given a path, queries the file system to get information about a file,
 /// directory, etc.
 ///
 /// This function will traverse symbolic links to query information about the
@@ -1927,7 +2044,7 @@ pub fn metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
     fs_imp::stat(path.as_ref()).map(Metadata)
 }
 
-/// Query the metadata about a file without following symlinks.
+/// Queries the metadata about a file without following symlinks.
 ///
 /// # Platform-specific behavior
 ///
@@ -1962,7 +2079,7 @@ pub fn symlink_metadata<P: AsRef<Path>>(path: P) -> io::Result<Metadata> {
     fs_imp::lstat(path.as_ref()).map(Metadata)
 }
 
-/// Rename a file or directory to a new name, replacing the original file if
+/// Renames a file or directory to a new name, replacing the original file if
 /// `to` already exists.
 ///
 /// This will not work if the new name is on a different mount point.
@@ -2185,7 +2302,7 @@ pub fn read_link<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 ///
 /// This function currently corresponds to the `realpath` function on Unix
 /// and the `CreateFile` and `GetFinalPathNameByHandle` functions on Windows.
-/// Note that, this [may change in the future][changes].
+/// Note that this [may change in the future][changes].
 ///
 /// On Windows, this converts the path to use [extended length path][path]
 /// syntax, which allows your program to use longer path names, but means you
@@ -2226,7 +2343,7 @@ pub fn canonicalize<P: AsRef<Path>>(path: P) -> io::Result<PathBuf> {
 /// # Platform-specific behavior
 ///
 /// This function currently corresponds to the `mkdir` function on Unix
-/// and the `CreateDirectory` function on Windows.
+/// and the `CreateDirectoryW` function on Windows.
 /// Note that, this [may change in the future][changes].
 ///
 /// [changes]: io#platform-specific-behavior
@@ -2266,23 +2383,25 @@ pub fn create_dir<P: AsRef<Path>>(path: P) -> io::Result<()> {
 /// Recursively create a directory and all of its parent components if they
 /// are missing.
 ///
+/// If this function returns an error, some of the parent components might have
+/// been created already.
+///
+/// If the empty path is passed to this function, it always succeeds without
+/// creating any directories.
+///
 /// # Platform-specific behavior
 ///
-/// This function currently corresponds to the `mkdir` function on Unix
-/// and the `CreateDirectory` function on Windows.
+/// This function currently corresponds to multiple calls to the `mkdir`
+/// function on Unix and the `CreateDirectoryW` function on Windows.
+///
 /// Note that, this [may change in the future][changes].
 ///
 /// [changes]: io#platform-specific-behavior
 ///
 /// # Errors
 ///
-/// This function will return an error in the following situations, but is not
-/// limited to just these cases:
-///
-/// * If any directory in the path specified by `path`
-/// does not already exist and it could not be created otherwise. The specific
-/// error conditions for when a directory is being created (after it is
-/// determined to not exist) are outlined by [`fs::create_dir`].
+/// The function will return an error if any directory specified in path does not exist and
+/// could not be created. There may be other error conditions; see [`fs::create_dir`] for specifics.
 ///
 /// Notable exception is made for situations where any of the directories
 /// specified in the `path` could not be created as it was being created concurrently.
@@ -2618,18 +2737,15 @@ impl AsInnerMut<fs_imp::DirBuilder> for DirBuilder {
 /// # Examples
 ///
 /// ```no_run
-/// #![feature(fs_try_exists)]
 /// use std::fs;
 ///
-/// assert!(!fs::try_exists("does_not_exist.txt").expect("Can't check existence of file does_not_exist.txt"));
-/// assert!(fs::try_exists("/root/secret_file.txt").is_err());
+/// assert!(!fs::exists("does_not_exist.txt").expect("Can't check existence of file does_not_exist.txt"));
+/// assert!(fs::exists("/root/secret_file.txt").is_err());
 /// ```
 ///
 /// [`Path::exists`]: crate::path::Path::exists
-// FIXME: stabilization should modify documentation of `exists()` to recommend this method
-// instead.
-#[unstable(feature = "fs_try_exists", issue = "83186")]
+#[stable(feature = "fs_try_exists", since = "1.81.0")]
 #[inline]
-pub fn try_exists<P: AsRef<Path>>(path: P) -> io::Result<bool> {
-    fs_imp::try_exists(path.as_ref())
+pub fn exists<P: AsRef<Path>>(path: P) -> io::Result<bool> {
+    fs_imp::exists(path.as_ref())
 }

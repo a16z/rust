@@ -1,20 +1,11 @@
-use crate::io::prelude::*;
-
-use crate::env;
-use crate::fs::{self, File, FileTimes, OpenOptions};
-use crate::io::{BorrowedBuf, ErrorKind, SeekFrom};
-use crate::mem::MaybeUninit;
-use crate::path::Path;
-use crate::str;
-use crate::sync::Arc;
-use crate::sys_common::io::test::{tmpdir, TempDir};
-use crate::thread;
-use crate::time::{Duration, Instant, SystemTime};
-
 use rand::RngCore;
 
 #[cfg(target_os = "macos")]
 use crate::ffi::{c_char, c_int};
+use crate::fs::{self, File, FileTimes, OpenOptions};
+use crate::io::prelude::*;
+use crate::io::{BorrowedBuf, ErrorKind, SeekFrom};
+use crate::mem::MaybeUninit;
 #[cfg(unix)]
 use crate::os::unix::fs::symlink as symlink_dir;
 #[cfg(unix)]
@@ -23,8 +14,13 @@ use crate::os::unix::fs::symlink as symlink_file;
 use crate::os::unix::fs::symlink as junction_point;
 #[cfg(windows)]
 use crate::os::windows::fs::{junction_point, symlink_dir, symlink_file, OpenOptionsExt};
+use crate::path::Path;
+use crate::sync::Arc;
 #[cfg(target_os = "macos")]
 use crate::sys::weak::weak;
+use crate::sys_common::io::test::{tmpdir, TempDir};
+use crate::time::{Duration, Instant, SystemTime};
+use crate::{env, str, thread};
 
 macro_rules! check {
     ($e:expr) => {
@@ -187,9 +183,9 @@ fn file_test_io_seek_and_tell_smoke_test() {
     {
         let mut read_stream = check!(File::open(filename));
         check!(read_stream.seek(SeekFrom::Start(set_cursor)));
-        tell_pos_pre_read = check!(read_stream.seek(SeekFrom::Current(0)));
+        tell_pos_pre_read = check!(read_stream.stream_position());
         check!(read_stream.read(&mut read_mem));
-        tell_pos_post_read = check!(read_stream.seek(SeekFrom::Current(0)));
+        tell_pos_post_read = check!(read_stream.stream_position());
     }
     check!(fs::remove_file(filename));
     let read_str = str::from_utf8(&read_mem).unwrap();
@@ -284,42 +280,42 @@ fn file_test_io_read_write_at() {
         let oo = OpenOptions::new().create_new(true).write(true).read(true).clone();
         let mut rw = check!(oo.open(&filename));
         assert_eq!(check!(rw.write_at(write1.as_bytes(), 5)), write1.len());
-        assert_eq!(check!(rw.seek(SeekFrom::Current(0))), 0);
+        assert_eq!(check!(rw.stream_position()), 0);
         assert_eq!(check!(rw.read_at(&mut buf, 5)), write1.len());
         assert_eq!(str::from_utf8(&buf[..write1.len()]), Ok(write1));
-        assert_eq!(check!(rw.seek(SeekFrom::Current(0))), 0);
+        assert_eq!(check!(rw.stream_position()), 0);
         assert_eq!(check!(rw.read_at(&mut buf[..write2.len()], 0)), write2.len());
         assert_eq!(str::from_utf8(&buf[..write2.len()]), Ok("\0\0\0\0\0"));
-        assert_eq!(check!(rw.seek(SeekFrom::Current(0))), 0);
+        assert_eq!(check!(rw.stream_position()), 0);
         assert_eq!(check!(rw.write(write2.as_bytes())), write2.len());
-        assert_eq!(check!(rw.seek(SeekFrom::Current(0))), 5);
+        assert_eq!(check!(rw.stream_position()), 5);
         assert_eq!(check!(rw.read(&mut buf)), write1.len());
         assert_eq!(str::from_utf8(&buf[..write1.len()]), Ok(write1));
-        assert_eq!(check!(rw.seek(SeekFrom::Current(0))), 9);
+        assert_eq!(check!(rw.stream_position()), 9);
         assert_eq!(check!(rw.read_at(&mut buf[..write2.len()], 0)), write2.len());
         assert_eq!(str::from_utf8(&buf[..write2.len()]), Ok(write2));
-        assert_eq!(check!(rw.seek(SeekFrom::Current(0))), 9);
+        assert_eq!(check!(rw.stream_position()), 9);
         assert_eq!(check!(rw.write_at(write3.as_bytes(), 9)), write3.len());
-        assert_eq!(check!(rw.seek(SeekFrom::Current(0))), 9);
+        assert_eq!(check!(rw.stream_position()), 9);
     }
     {
         let mut read = check!(File::open(&filename));
         assert_eq!(check!(read.read_at(&mut buf, 0)), content.len());
         assert_eq!(str::from_utf8(&buf[..content.len()]), Ok(content));
-        assert_eq!(check!(read.seek(SeekFrom::Current(0))), 0);
+        assert_eq!(check!(read.stream_position()), 0);
         assert_eq!(check!(read.seek(SeekFrom::End(-5))), 9);
         assert_eq!(check!(read.read_at(&mut buf, 0)), content.len());
         assert_eq!(str::from_utf8(&buf[..content.len()]), Ok(content));
-        assert_eq!(check!(read.seek(SeekFrom::Current(0))), 9);
+        assert_eq!(check!(read.stream_position()), 9);
         assert_eq!(check!(read.read(&mut buf)), write3.len());
         assert_eq!(str::from_utf8(&buf[..write3.len()]), Ok(write3));
-        assert_eq!(check!(read.seek(SeekFrom::Current(0))), 14);
+        assert_eq!(check!(read.stream_position()), 14);
         assert_eq!(check!(read.read_at(&mut buf, 0)), content.len());
         assert_eq!(str::from_utf8(&buf[..content.len()]), Ok(content));
-        assert_eq!(check!(read.seek(SeekFrom::Current(0))), 14);
+        assert_eq!(check!(read.stream_position()), 14);
         assert_eq!(check!(read.read_at(&mut buf, 14)), 0);
         assert_eq!(check!(read.read_at(&mut buf, 15)), 0);
-        assert_eq!(check!(read.seek(SeekFrom::Current(0))), 14);
+        assert_eq!(check!(read.stream_position()), 14);
     }
     check!(fs::remove_file(&filename));
 }
@@ -362,38 +358,38 @@ fn file_test_io_seek_read_write() {
         let oo = OpenOptions::new().create_new(true).write(true).read(true).clone();
         let mut rw = check!(oo.open(&filename));
         assert_eq!(check!(rw.seek_write(write1.as_bytes(), 5)), write1.len());
-        assert_eq!(check!(rw.seek(SeekFrom::Current(0))), 9);
+        assert_eq!(check!(rw.stream_position()), 9);
         assert_eq!(check!(rw.seek_read(&mut buf, 5)), write1.len());
         assert_eq!(str::from_utf8(&buf[..write1.len()]), Ok(write1));
-        assert_eq!(check!(rw.seek(SeekFrom::Current(0))), 9);
+        assert_eq!(check!(rw.stream_position()), 9);
         assert_eq!(check!(rw.seek(SeekFrom::Start(0))), 0);
         assert_eq!(check!(rw.write(write2.as_bytes())), write2.len());
-        assert_eq!(check!(rw.seek(SeekFrom::Current(0))), 5);
+        assert_eq!(check!(rw.stream_position()), 5);
         assert_eq!(check!(rw.read(&mut buf)), write1.len());
         assert_eq!(str::from_utf8(&buf[..write1.len()]), Ok(write1));
-        assert_eq!(check!(rw.seek(SeekFrom::Current(0))), 9);
+        assert_eq!(check!(rw.stream_position()), 9);
         assert_eq!(check!(rw.seek_read(&mut buf[..write2.len()], 0)), write2.len());
         assert_eq!(str::from_utf8(&buf[..write2.len()]), Ok(write2));
-        assert_eq!(check!(rw.seek(SeekFrom::Current(0))), 5);
+        assert_eq!(check!(rw.stream_position()), 5);
         assert_eq!(check!(rw.seek_write(write3.as_bytes(), 9)), write3.len());
-        assert_eq!(check!(rw.seek(SeekFrom::Current(0))), 14);
+        assert_eq!(check!(rw.stream_position()), 14);
     }
     {
         let mut read = check!(File::open(&filename));
         assert_eq!(check!(read.seek_read(&mut buf, 0)), content.len());
         assert_eq!(str::from_utf8(&buf[..content.len()]), Ok(content));
-        assert_eq!(check!(read.seek(SeekFrom::Current(0))), 14);
+        assert_eq!(check!(read.stream_position()), 14);
         assert_eq!(check!(read.seek(SeekFrom::End(-5))), 9);
         assert_eq!(check!(read.seek_read(&mut buf, 0)), content.len());
         assert_eq!(str::from_utf8(&buf[..content.len()]), Ok(content));
-        assert_eq!(check!(read.seek(SeekFrom::Current(0))), 14);
+        assert_eq!(check!(read.stream_position()), 14);
         assert_eq!(check!(read.seek(SeekFrom::End(-5))), 9);
         assert_eq!(check!(read.read(&mut buf)), write3.len());
         assert_eq!(str::from_utf8(&buf[..write3.len()]), Ok(write3));
-        assert_eq!(check!(read.seek(SeekFrom::Current(0))), 14);
+        assert_eq!(check!(read.stream_position()), 14);
         assert_eq!(check!(read.seek_read(&mut buf, 0)), content.len());
         assert_eq!(str::from_utf8(&buf[..content.len()]), Ok(content));
-        assert_eq!(check!(read.seek(SeekFrom::Current(0))), 14);
+        assert_eq!(check!(read.stream_position()), 14);
         assert_eq!(check!(read.seek_read(&mut buf, 14)), 0);
         assert_eq!(check!(read.seek_read(&mut buf, 15)), 0);
     }
@@ -406,7 +402,7 @@ fn file_test_read_buf() {
     let filename = &tmpdir.join("test");
     check!(fs::write(filename, &[1, 2, 3, 4]));
 
-    let mut buf: [MaybeUninit<u8>; 128] = MaybeUninit::uninit_array();
+    let mut buf: [MaybeUninit<u8>; 128] = [MaybeUninit::uninit(); 128];
     let mut buf = BorrowedBuf::from(buf.as_mut_slice());
     let mut file = check!(File::open(filename));
     check!(file.read_buf(buf.unfilled()));
@@ -683,7 +679,7 @@ fn recursive_rmdir_toctou() {
     let drop_canary_arc = Arc::new(());
     let drop_canary_weak = Arc::downgrade(&drop_canary_arc);
 
-    eprintln!("x: {:?}", &victim_del_path);
+    eprintln!("x: {victim_del_path:?}");
 
     // victim just continuously removes `victim_del`
     thread::spawn(move || {
@@ -1431,7 +1427,7 @@ fn metadata_access_times() {
     assert_eq!(check!(a.modified()), check!(a.modified()));
     assert_eq!(check!(b.accessed()), check!(b.modified()));
 
-    if cfg!(target_os = "macos") || cfg!(target_os = "windows") {
+    if cfg!(target_vendor = "apple") || cfg!(target_os = "windows") {
         check!(a.created());
         check!(b.created());
     }
@@ -1514,7 +1510,9 @@ fn symlink_hard_link() {
 #[test]
 #[cfg(windows)]
 fn create_dir_long_paths() {
-    use crate::{ffi::OsStr, iter, os::windows::ffi::OsStrExt};
+    use crate::ffi::OsStr;
+    use crate::iter;
+    use crate::os::windows::ffi::OsStrExt;
     const PATH_LEN: usize = 247;
 
     let tmpdir = tmpdir();
@@ -1638,16 +1636,8 @@ fn rename_directory() {
 
 #[test]
 fn test_file_times() {
-    #[cfg(target_os = "ios")]
-    use crate::os::ios::fs::FileTimesExt;
-    #[cfg(target_os = "macos")]
-    use crate::os::macos::fs::FileTimesExt;
-    #[cfg(target_os = "tvos")]
-    use crate::os::tvos::fs::FileTimesExt;
-    #[cfg(target_os = "visionos")]
-    use crate::os::visionos::fs::FileTimesExt;
-    #[cfg(target_os = "watchos")]
-    use crate::os::watchos::fs::FileTimesExt;
+    #[cfg(target_vendor = "apple")]
+    use crate::os::darwin::fs::FileTimesExt;
     #[cfg(windows)]
     use crate::os::windows::fs::FileTimesExt;
 
@@ -1657,23 +1647,9 @@ fn test_file_times() {
     let accessed = SystemTime::UNIX_EPOCH + Duration::from_secs(12345);
     let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(54321);
     times = times.set_accessed(accessed).set_modified(modified);
-    #[cfg(any(
-        windows,
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "watchos",
-        target_os = "visionos",
-        target_os = "tvos",
-    ))]
+    #[cfg(any(windows, target_vendor = "apple"))]
     let created = SystemTime::UNIX_EPOCH + Duration::from_secs(32123);
-    #[cfg(any(
-        windows,
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "watchos",
-        target_os = "visionos",
-        target_os = "tvos",
-    ))]
+    #[cfg(any(windows, target_vendor = "apple"))]
     {
         times = times.set_created(created);
     }
@@ -1698,38 +1674,16 @@ fn test_file_times() {
     let metadata = file.metadata().unwrap();
     assert_eq!(metadata.accessed().unwrap(), accessed);
     assert_eq!(metadata.modified().unwrap(), modified);
-    #[cfg(any(
-        windows,
-        target_os = "macos",
-        target_os = "ios",
-        target_os = "watchos",
-        target_os = "visionos",
-        target_os = "tvos",
-    ))]
+    #[cfg(any(windows, target_vendor = "apple"))]
     {
         assert_eq!(metadata.created().unwrap(), created);
     }
 }
 
 #[test]
-#[cfg(any(
-    target_os = "macos",
-    target_os = "ios",
-    target_os = "tvos",
-    target_os = "watchos",
-    target_os = "visionos"
-))]
+#[cfg(target_vendor = "apple")]
 fn test_file_times_pre_epoch_with_nanos() {
-    #[cfg(target_os = "ios")]
-    use crate::os::ios::fs::FileTimesExt;
-    #[cfg(target_os = "macos")]
-    use crate::os::macos::fs::FileTimesExt;
-    #[cfg(target_os = "tvos")]
-    use crate::os::tvos::fs::FileTimesExt;
-    #[cfg(target_os = "visionos")]
-    use crate::os::visionos::fs::FileTimesExt;
-    #[cfg(target_os = "watchos")]
-    use crate::os::watchos::fs::FileTimesExt;
+    use crate::os::darwin::fs::FileTimesExt;
 
     let tmp = tmpdir();
     let file = File::create(tmp.join("foo")).unwrap();

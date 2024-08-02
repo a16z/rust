@@ -1,17 +1,18 @@
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::source::{indent_of, snippet};
 use clippy_utils::{expr_or_init, get_attr, path_to_local, peel_hir_expr_unary};
-use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap};
+use rustc_data_structures::fx::{FxHashMap, FxIndexMap};
 use rustc_errors::Applicability;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::intravisit::{walk_expr, Visitor};
-use rustc_hir::{self as hir};
+use rustc_hir::{self as hir, HirId};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_middle::ty::{GenericArgKind, Ty};
 use rustc_session::impl_lint_pass;
 use rustc_span::symbol::Ident;
 use rustc_span::{sym, Span, DUMMY_SP};
 use std::borrow::Cow;
+use std::collections::hash_map::Entry;
 
 declare_clippy_lint! {
     /// ### What it does
@@ -55,9 +56,8 @@ impl_lint_pass!(SignificantDropTightening<'_> => [SIGNIFICANT_DROP_TIGHTENING]);
 
 #[derive(Default)]
 pub struct SignificantDropTightening<'tcx> {
-    apas: FxIndexMap<hir::HirId, AuxParamsAttr>,
+    apas: FxIndexMap<HirId, AuxParamsAttr>,
     /// Auxiliary structure used to avoid having to verify the same type multiple times.
-    seen_types: FxHashSet<Ty<'tcx>>,
     type_cache: FxHashMap<Ty<'tcx>, bool>,
 }
 
@@ -74,7 +74,7 @@ impl<'tcx> LateLintPass<'tcx> for SignificantDropTightening<'tcx> {
         self.apas.clear();
         let initial_dummy_stmt = dummy_stmt_expr(body.value);
         let mut ap = AuxParams::new(&mut self.apas, &initial_dummy_stmt);
-        StmtsChecker::new(&mut ap, cx, &mut self.seen_types, &mut self.type_cache).visit_body(body);
+        StmtsChecker::new(&mut ap, cx, &mut self.type_cache).visit_body(body);
         for apa in ap.apas.values() {
             if apa.counter <= 1 || !apa.has_expensive_expr_after_last_attr {
                 continue;
@@ -142,28 +142,25 @@ impl<'tcx> LateLintPass<'tcx> for SignificantDropTightening<'tcx> {
 /// Checks the existence of the `#[has_significant_drop]` attribute.
 struct AttrChecker<'cx, 'others, 'tcx> {
     cx: &'cx LateContext<'tcx>,
-    seen_types: &'others mut FxHashSet<Ty<'tcx>>,
     type_cache: &'others mut FxHashMap<Ty<'tcx>, bool>,
 }
 
 impl<'cx, 'others, 'tcx> AttrChecker<'cx, 'others, 'tcx> {
-    pub(crate) fn new(
-        cx: &'cx LateContext<'tcx>,
-        seen_types: &'others mut FxHashSet<Ty<'tcx>>,
-        type_cache: &'others mut FxHashMap<Ty<'tcx>, bool>,
-    ) -> Self {
-        seen_types.clear();
-        Self {
-            cx,
-            seen_types,
-            type_cache,
-        }
+    pub(crate) fn new(cx: &'cx LateContext<'tcx>, type_cache: &'others mut FxHashMap<Ty<'tcx>, bool>) -> Self {
+        Self { cx, type_cache }
     }
 
     fn has_sig_drop_attr(&mut self, ty: Ty<'tcx>) -> bool {
-        // The borrow checker prevents us from using something fancier like or_insert_with.
-        if let Some(ty) = self.type_cache.get(&ty) {
-            return *ty;
+        let ty = self
+            .cx
+            .tcx
+            .try_normalize_erasing_regions(self.cx.param_env, ty)
+            .unwrap_or(ty);
+        match self.type_cache.entry(ty) {
+            Entry::Occupied(e) => return *e.get(),
+            Entry::Vacant(e) => {
+                e.insert(false);
+            },
         }
         let value = self.has_sig_drop_attr_uncached(ty);
         self.type_cache.insert(ty, value);
@@ -185,7 +182,7 @@ impl<'cx, 'others, 'tcx> AttrChecker<'cx, 'others, 'tcx> {
             rustc_middle::ty::Adt(a, b) => {
                 for f in a.all_fields() {
                     let ty = f.ty(self.cx.tcx, b);
-                    if !self.has_seen_ty(ty) && self.has_sig_drop_attr(ty) {
+                    if self.has_sig_drop_attr(ty) {
                         return true;
                     }
                 }
@@ -205,16 +202,11 @@ impl<'cx, 'others, 'tcx> AttrChecker<'cx, 'others, 'tcx> {
             _ => false,
         }
     }
-
-    fn has_seen_ty(&mut self, ty: Ty<'tcx>) -> bool {
-        !self.seen_types.insert(ty)
-    }
 }
 
 struct StmtsChecker<'ap, 'lc, 'others, 'stmt, 'tcx> {
     ap: &'ap mut AuxParams<'others, 'stmt, 'tcx>,
     cx: &'lc LateContext<'tcx>,
-    seen_types: &'others mut FxHashSet<Ty<'tcx>>,
     type_cache: &'others mut FxHashMap<Ty<'tcx>, bool>,
 }
 
@@ -222,15 +214,9 @@ impl<'ap, 'lc, 'others, 'stmt, 'tcx> StmtsChecker<'ap, 'lc, 'others, 'stmt, 'tcx
     fn new(
         ap: &'ap mut AuxParams<'others, 'stmt, 'tcx>,
         cx: &'lc LateContext<'tcx>,
-        seen_types: &'others mut FxHashSet<Ty<'tcx>>,
         type_cache: &'others mut FxHashMap<Ty<'tcx>, bool>,
     ) -> Self {
-        Self {
-            ap,
-            cx,
-            seen_types,
-            type_cache,
-        }
+        Self { ap, cx, type_cache }
     }
 
     fn manage_has_expensive_expr_after_last_attr(&mut self) {
@@ -288,7 +274,7 @@ impl<'ap, 'lc, 'others, 'stmt, 'tcx> Visitor<'tcx> for StmtsChecker<'ap, 'lc, 'o
             apa.counter = apa.counter.wrapping_add(1);
             apa.has_expensive_expr_after_last_attr = false;
         };
-        let mut ac = AttrChecker::new(self.cx, self.seen_types, self.type_cache);
+        let mut ac = AttrChecker::new(self.cx, self.type_cache);
         if ac.has_sig_drop_attr(self.cx.typeck_results().expr_ty(expr)) {
             if let hir::StmtKind::Let(local) = self.ap.curr_stmt.kind
                 && let hir::PatKind::Binding(_, hir_id, ident, _) = local.pat.kind
@@ -359,9 +345,9 @@ impl<'ap, 'lc, 'others, 'stmt, 'tcx> Visitor<'tcx> for StmtsChecker<'ap, 'lc, 'o
 /// Auxiliary parameters used on each block check of an item
 struct AuxParams<'others, 'stmt, 'tcx> {
     //// See [AuxParamsAttr].
-    apas: &'others mut FxIndexMap<hir::HirId, AuxParamsAttr>,
+    apas: &'others mut FxIndexMap<HirId, AuxParamsAttr>,
     /// The current block identifier that is being visited.
-    curr_block_hir_id: hir::HirId,
+    curr_block_hir_id: HirId,
     /// The current block span that is being visited.
     curr_block_span: Span,
     /// The current statement that is being visited.
@@ -369,10 +355,10 @@ struct AuxParams<'others, 'stmt, 'tcx> {
 }
 
 impl<'others, 'stmt, 'tcx> AuxParams<'others, 'stmt, 'tcx> {
-    fn new(apas: &'others mut FxIndexMap<hir::HirId, AuxParamsAttr>, curr_stmt: &'stmt hir::Stmt<'tcx>) -> Self {
+    fn new(apas: &'others mut FxIndexMap<HirId, AuxParamsAttr>, curr_stmt: &'stmt hir::Stmt<'tcx>) -> Self {
         Self {
             apas,
-            curr_block_hir_id: hir::HirId::INVALID,
+            curr_block_hir_id: HirId::INVALID,
             curr_block_span: DUMMY_SP,
             curr_stmt: Cow::Borrowed(curr_stmt),
         }
@@ -389,7 +375,7 @@ struct AuxParamsAttr {
     has_expensive_expr_after_last_attr: bool,
 
     /// The identifier of the block that involves the first `#[has_significant_drop]`.
-    first_block_hir_id: hir::HirId,
+    first_block_hir_id: HirId,
     /// The span of the block that involves the first `#[has_significant_drop]`.
     first_block_span: Span,
     /// The binding or variable that references the initial construction of the type marked with
@@ -414,7 +400,7 @@ impl Default for AuxParamsAttr {
         Self {
             counter: 0,
             has_expensive_expr_after_last_attr: false,
-            first_block_hir_id: hir::HirId::INVALID,
+            first_block_hir_id: HirId::INVALID,
             first_bind_ident: Ident::empty(),
             first_block_span: DUMMY_SP,
             first_method_span: DUMMY_SP,
@@ -428,7 +414,7 @@ impl Default for AuxParamsAttr {
 
 fn dummy_stmt_expr<'any>(expr: &'any hir::Expr<'any>) -> hir::Stmt<'any> {
     hir::Stmt {
-        hir_id: hir::HirId::INVALID,
+        hir_id: HirId::INVALID,
         kind: hir::StmtKind::Expr(expr),
         span: DUMMY_SP,
     }

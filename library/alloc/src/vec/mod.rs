@@ -66,14 +66,13 @@ use core::ops::{self, Index, IndexMut, Range, RangeBounds};
 use core::ptr::{self, NonNull};
 use core::slice::{self, SliceIndex};
 
+#[unstable(feature = "extract_if", reason = "recently added", issue = "43244")]
+pub use self::extract_if::ExtractIf;
 use crate::alloc::{Allocator, Global};
 use crate::borrow::{Cow, ToOwned};
 use crate::boxed::Box;
 use crate::collections::TryReserveError;
 use crate::raw_vec::RawVec;
-
-#[unstable(feature = "extract_if", reason = "recently added", issue = "43244")]
-pub use self::extract_if::ExtractIf;
 
 mod extract_if;
 
@@ -603,6 +602,17 @@ impl<T> Vec<T> {
     pub unsafe fn from_raw_parts(ptr: *mut T, length: usize, capacity: usize) -> Self {
         unsafe { Self::from_raw_parts_in(ptr, length, capacity, Global) }
     }
+
+    /// A convenience method for hoisting the non-null precondition out of [`Vec::from_raw_parts`].
+    ///
+    /// # Safety
+    ///
+    /// See [`Vec::from_raw_parts`].
+    #[inline]
+    #[cfg(not(no_global_oom_handling))] // required by tests/run-make/alloc-no-oom-handling
+    pub(crate) unsafe fn from_nonnull(ptr: NonNull<T>, length: usize, capacity: usize) -> Self {
+        unsafe { Self::from_nonnull_in(ptr, length, capacity, Global) }
+    }
 }
 
 impl<T, A: Allocator> Vec<T, A> {
@@ -818,6 +828,22 @@ impl<T, A: Allocator> Vec<T, A> {
     #[unstable(feature = "allocator_api", issue = "32838")]
     pub unsafe fn from_raw_parts_in(ptr: *mut T, length: usize, capacity: usize, alloc: A) -> Self {
         unsafe { Vec { buf: RawVec::from_raw_parts_in(ptr, capacity, alloc), len: length } }
+    }
+
+    /// A convenience method for hoisting the non-null precondition out of [`Vec::from_raw_parts_in`].
+    ///
+    /// # Safety
+    ///
+    /// See [`Vec::from_raw_parts_in`].
+    #[inline]
+    #[cfg(not(no_global_oom_handling))] // required by tests/run-make/alloc-no-oom-handling
+    pub(crate) unsafe fn from_nonnull_in(
+        ptr: NonNull<T>,
+        length: usize,
+        capacity: usize,
+        alloc: A,
+    ) -> Self {
+        unsafe { Vec { buf: RawVec::from_nonnull_in(ptr, capacity, alloc), len: length } }
     }
 
     /// Decomposes a `Vec<T>` into its raw components: `(pointer, length, capacity)`.
@@ -1074,6 +1100,7 @@ impl<T, A: Allocator> Vec<T, A> {
     /// ```
     #[cfg(not(no_global_oom_handling))]
     #[stable(feature = "rust1", since = "1.0.0")]
+    #[inline]
     pub fn shrink_to_fit(&mut self) {
         // The capacity is never less than the length, and there's nothing to do when
         // they are equal, so we can avoid the panic case in `RawVec::shrink_to_fit`
@@ -1249,7 +1276,7 @@ impl<T, A: Allocator> Vec<T, A> {
     /// valid for zero sized reads if the vector didn't allocate.
     ///
     /// The caller must ensure that the vector outlives the pointer this
-    /// function returns, or else it will end up pointing to garbage.
+    /// function returns, or else it will end up dangling.
     /// Modifying the vector may cause its buffer to be reallocated,
     /// which would also make any pointers to it invalid.
     ///
@@ -1309,7 +1336,7 @@ impl<T, A: Allocator> Vec<T, A> {
     /// raw pointer valid for zero sized reads if the vector didn't allocate.
     ///
     /// The caller must ensure that the vector outlives the pointer this
-    /// function returns, or else it will end up pointing to garbage.
+    /// function returns, or else it will end up dangling.
     /// Modifying the vector may cause its buffer to be reallocated,
     /// which would also make any pointers to it invalid.
     ///
@@ -1445,6 +1472,9 @@ impl<T, A: Allocator> Vec<T, A> {
     /// // 2. `0 <= capacity` always holds whatever `capacity` is.
     /// unsafe {
     ///     vec.set_len(0);
+    /// #   // FIXME(https://github.com/rust-lang/miri/issues/3670):
+    /// #   // use -Zmiri-disable-leak-check instead of unleaking in tests meant to leak.
+    /// #   vec.set_len(3);
     /// }
     /// ```
     ///
@@ -1680,6 +1710,12 @@ impl<T, A: Allocator> Vec<T, A> {
         F: FnMut(&mut T) -> bool,
     {
         let original_len = self.len();
+
+        if original_len == 0 {
+            // Empty case: explicit return allows better optimization, vs letting compiler infer it
+            return;
+        }
+
         // Avoid double drop if the drop guard is not executed,
         // since we may make some holes during the process.
         unsafe { self.set_len(0) };
@@ -1964,15 +2000,17 @@ impl<T, A: Allocator> Vec<T, A> {
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_confusables("push_back", "put", "append")]
     pub fn push(&mut self, value: T) {
+        // Inform codegen that the length does not change across grow_one().
+        let len = self.len;
         // This will panic or abort if we would allocate > isize::MAX bytes
         // or if the length increment would overflow for zero-sized types.
-        if self.len == self.buf.capacity() {
+        if len == self.buf.capacity() {
             self.buf.grow_one();
         }
         unsafe {
-            let end = self.as_mut_ptr().add(self.len);
+            let end = self.as_mut_ptr().add(len);
             ptr::write(end, value);
-            self.len += 1;
+            self.len = len + 1;
         }
     }
 
@@ -2340,9 +2378,11 @@ impl<T, A: Allocator> Vec<T, A> {
     }
 
     /// Consumes and leaks the `Vec`, returning a mutable reference to the contents,
-    /// `&'a mut [T]`. Note that the type `T` must outlive the chosen lifetime
-    /// `'a`. If the type has only static references, or none at all, then this
-    /// may be chosen to be `'static`.
+    /// `&'a mut [T]`.
+    ///
+    /// Note that the type `T` must outlive the chosen lifetime `'a`. If the type
+    /// has only static references, or none at all, then this may be chosen to be
+    /// `'static`.
     ///
     /// As of Rust 1.57, this method does not reallocate or shrink the `Vec`,
     /// so the leaked allocation may include unused capacity that is not part
@@ -2361,6 +2401,9 @@ impl<T, A: Allocator> Vec<T, A> {
     /// let static_ref: &'static mut [usize] = x.leak();
     /// static_ref[0] += 1;
     /// assert_eq!(static_ref, &[2, 2, 3]);
+    /// # // FIXME(https://github.com/rust-lang/miri/issues/3670):
+    /// # // use -Zmiri-disable-leak-check instead of unleaking in tests meant to leak.
+    /// # drop(unsafe { Box::from_raw(static_ref) });
     /// ```
     #[stable(feature = "vec_leak", since = "1.47.0")]
     #[inline]
@@ -2614,15 +2657,13 @@ impl<T, A: Allocator, const N: usize> Vec<[T; N], A> {
     /// # Examples
     ///
     /// ```
-    /// #![feature(slice_flatten)]
-    ///
     /// let mut vec = vec![[1, 2, 3], [4, 5, 6], [7, 8, 9]];
     /// assert_eq!(vec.pop(), Some([7, 8, 9]));
     ///
     /// let mut flattened = vec.into_flattened();
     /// assert_eq!(flattened.pop(), Some(6));
     /// ```
-    #[unstable(feature = "slice_flatten", issue = "95629")]
+    #[stable(feature = "slice_flatten", since = "1.80.0")]
     pub fn into_flattened(self) -> Vec<T, A> {
         let (ptr, len, cap, alloc) = self.into_raw_parts_with_alloc();
         let (new_len, new_cap) = if T::IS_ZST {
@@ -2819,8 +2860,30 @@ impl<T: Clone, A: Allocator + Clone> Clone for Vec<T, A> {
         crate::slice::to_vec(&**self, alloc)
     }
 
-    fn clone_from(&mut self, other: &Self) {
-        crate::slice::SpecCloneIntoVec::clone_into(other.as_slice(), self);
+    /// Overwrites the contents of `self` with a clone of the contents of `source`.
+    ///
+    /// This method is preferred over simply assigning `source.clone()` to `self`,
+    /// as it avoids reallocation if possible. Additionally, if the element type
+    /// `T` overrides `clone_from()`, this will reuse the resources of `self`'s
+    /// elements as well.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// let x = vec![5, 6, 7];
+    /// let mut y = vec![8, 9, 10];
+    /// let yp: *const i32 = y.as_ptr();
+    ///
+    /// y.clone_from(&x);
+    ///
+    /// // The value is the same
+    /// assert_eq!(x, y);
+    ///
+    /// // And no reallocation occurred
+    /// assert_eq!(yp, y.as_ptr());
+    /// ```
+    fn clone_from(&mut self, source: &Self) {
+        crate::slice::SpecCloneIntoVec::clone_into(source.as_slice(), self);
     }
 }
 
@@ -2997,6 +3060,16 @@ impl<T, A: Allocator> Extend<T> for Vec<T, A> {
     #[inline]
     fn extend_reserve(&mut self, additional: usize) {
         self.reserve(additional);
+    }
+
+    #[inline]
+    unsafe fn extend_one_unchecked(&mut self, item: T) {
+        // SAFETY: Our preconditions ensure the space has been reserved, and `extend_reserve` is implemented correctly.
+        unsafe {
+            let len = self.len();
+            ptr::write(self.as_mut_ptr().add(len), item);
+            self.set_len(len + 1);
+        }
     }
 }
 
@@ -3194,6 +3267,16 @@ impl<'a, T: Copy + 'a, A: Allocator> Extend<&'a T> for Vec<T, A> {
     fn extend_reserve(&mut self, additional: usize) {
         self.reserve(additional);
     }
+
+    #[inline]
+    unsafe fn extend_one_unchecked(&mut self, &item: &'a T) {
+        // SAFETY: Our preconditions ensure the space has been reserved, and `extend_reserve` is implemented correctly.
+        unsafe {
+            let len = self.len();
+            ptr::write(self.as_mut_ptr().add(len), item);
+            self.set_len(len + 1);
+        }
+    }
 }
 
 /// Implements comparison of vectors, [lexicographically](Ord#lexicographical-comparison).
@@ -3283,7 +3366,7 @@ impl<T, A: Allocator> AsMut<[T]> for Vec<T, A> {
 #[cfg(not(no_global_oom_handling))]
 #[stable(feature = "rust1", since = "1.0.0")]
 impl<T: Clone> From<&[T]> for Vec<T> {
-    /// Allocate a `Vec<T>` and fill it by cloning `s`'s items.
+    /// Allocates a `Vec<T>` and fills it by cloning `s`'s items.
     ///
     /// # Examples
     ///
@@ -3303,7 +3386,7 @@ impl<T: Clone> From<&[T]> for Vec<T> {
 #[cfg(not(no_global_oom_handling))]
 #[stable(feature = "vec_from_mut", since = "1.19.0")]
 impl<T: Clone> From<&mut [T]> for Vec<T> {
-    /// Allocate a `Vec<T>` and fill it by cloning `s`'s items.
+    /// Allocates a `Vec<T>` and fills it by cloning `s`'s items.
     ///
     /// # Examples
     ///
@@ -3323,7 +3406,7 @@ impl<T: Clone> From<&mut [T]> for Vec<T> {
 #[cfg(not(no_global_oom_handling))]
 #[stable(feature = "vec_from_array_ref", since = "1.74.0")]
 impl<T: Clone, const N: usize> From<&[T; N]> for Vec<T> {
-    /// Allocate a `Vec<T>` and fill it by cloning `s`'s items.
+    /// Allocates a `Vec<T>` and fills it by cloning `s`'s items.
     ///
     /// # Examples
     ///
@@ -3338,7 +3421,7 @@ impl<T: Clone, const N: usize> From<&[T; N]> for Vec<T> {
 #[cfg(not(no_global_oom_handling))]
 #[stable(feature = "vec_from_array_ref", since = "1.74.0")]
 impl<T: Clone, const N: usize> From<&mut [T; N]> for Vec<T> {
-    /// Allocate a `Vec<T>` and fill it by cloning `s`'s items.
+    /// Allocates a `Vec<T>` and fills it by cloning `s`'s items.
     ///
     /// # Examples
     ///
@@ -3353,7 +3436,7 @@ impl<T: Clone, const N: usize> From<&mut [T; N]> for Vec<T> {
 #[cfg(not(no_global_oom_handling))]
 #[stable(feature = "vec_from_array", since = "1.44.0")]
 impl<T, const N: usize> From<[T; N]> for Vec<T> {
-    /// Allocate a `Vec<T>` and move `s`'s items into it.
+    /// Allocates a `Vec<T>` and moves `s`'s items into it.
     ///
     /// # Examples
     ///
@@ -3376,7 +3459,7 @@ impl<'a, T> From<Cow<'a, [T]>> for Vec<T>
 where
     [T]: ToOwned<Owned = Vec<T>>,
 {
-    /// Convert a clone-on-write slice into a vector.
+    /// Converts a clone-on-write slice into a vector.
     ///
     /// If `s` already owns a `Vec<T>`, it will be returned directly.
     /// If `s` is borrowing a slice, a new `Vec<T>` will be allocated and
@@ -3399,7 +3482,7 @@ where
 #[cfg(not(test))]
 #[stable(feature = "vec_from_box", since = "1.18.0")]
 impl<T, A: Allocator> From<Box<[T], A>> for Vec<T, A> {
-    /// Convert a boxed slice into a vector by transferring ownership of
+    /// Converts a boxed slice into a vector by transferring ownership of
     /// the existing heap allocation.
     ///
     /// # Examples
@@ -3418,7 +3501,7 @@ impl<T, A: Allocator> From<Box<[T], A>> for Vec<T, A> {
 #[cfg(not(test))]
 #[stable(feature = "box_from_vec", since = "1.20.0")]
 impl<T, A: Allocator> From<Vec<T, A>> for Box<[T], A> {
-    /// Convert a vector into a boxed slice.
+    /// Converts a vector into a boxed slice.
     ///
     /// Before doing the conversion, this method discards excess capacity like [`Vec::shrink_to_fit`].
     ///
@@ -3446,7 +3529,7 @@ impl<T, A: Allocator> From<Vec<T, A>> for Box<[T], A> {
 #[cfg(not(no_global_oom_handling))]
 #[stable(feature = "rust1", since = "1.0.0")]
 impl From<&str> for Vec<u8> {
-    /// Allocate a `Vec<u8>` and fill it with a UTF-8 string.
+    /// Allocates a `Vec<u8>` and fills it with a UTF-8 string.
     ///
     /// # Examples
     ///

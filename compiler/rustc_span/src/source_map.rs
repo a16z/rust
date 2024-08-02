@@ -9,12 +9,15 @@
 //! within the `SourceMap`, which upon request can be converted to line and column
 //! information, source code snippets, etc.
 
-use crate::*;
+use std::io::{self, BorrowedBuf, Read};
+use std::{fs, path};
+
 use rustc_data_structures::sync::{IntoDynSyncSend, MappedReadGuard, ReadGuard, RwLock};
 use rustc_data_structures::unhash::UnhashMap;
-use std::fs;
-use std::io::{self, BorrowedBuf, Read};
-use std::path::{self};
+use rustc_macros::{Decodable, Encodable};
+use tracing::{debug, instrument, trace};
+
+use crate::*;
 
 #[cfg(test)]
 mod tests;
@@ -167,9 +170,17 @@ struct SourceMapFiles {
     stable_id_to_source_file: UnhashMap<StableSourceFileId, Lrc<SourceFile>>,
 }
 
+/// Used to construct a `SourceMap` with `SourceMap::with_inputs`.
+pub struct SourceMapInputs {
+    pub file_loader: Box<dyn FileLoader + Send + Sync>,
+    pub path_mapping: FilePathMapping,
+    pub hash_kind: SourceFileHashAlgorithm,
+}
+
 pub struct SourceMap {
     files: RwLock<SourceMapFiles>,
     file_loader: IntoDynSyncSend<Box<dyn FileLoader + Sync + Send>>,
+
     // This is used to apply the file path remapping as specified via
     // `--remap-path-prefix` to all `SourceFile`s allocated within this `SourceMap`.
     path_mapping: FilePathMapping,
@@ -180,17 +191,15 @@ pub struct SourceMap {
 
 impl SourceMap {
     pub fn new(path_mapping: FilePathMapping) -> SourceMap {
-        Self::with_file_loader_and_hash_kind(
-            Box::new(RealFileLoader),
+        Self::with_inputs(SourceMapInputs {
+            file_loader: Box::new(RealFileLoader),
             path_mapping,
-            SourceFileHashAlgorithm::Md5,
-        )
+            hash_kind: SourceFileHashAlgorithm::Md5,
+        })
     }
 
-    pub fn with_file_loader_and_hash_kind(
-        file_loader: Box<dyn FileLoader + Sync + Send>,
-        path_mapping: FilePathMapping,
-        hash_kind: SourceFileHashAlgorithm,
+    pub fn with_inputs(
+        SourceMapInputs { file_loader, path_mapping, hash_kind }: SourceMapInputs,
     ) -> SourceMap {
         SourceMap {
             files: Default::default(),
@@ -218,7 +227,7 @@ impl SourceMap {
     ///
     /// Unlike `load_file`, guarantees that no normalization like BOM-removal
     /// takes place.
-    pub fn load_binary_file(&self, path: &Path) -> io::Result<Lrc<[u8]>> {
+    pub fn load_binary_file(&self, path: &Path) -> io::Result<(Lrc<[u8]>, Span)> {
         let bytes = self.file_loader.read_binary_file(path)?;
 
         // We need to add file to the `SourceMap`, so that it is present
@@ -227,8 +236,16 @@ impl SourceMap {
         // via `mod`, so we try to use real file contents and not just an
         // empty string.
         let text = std::str::from_utf8(&bytes).unwrap_or("").to_string();
-        self.new_source_file(path.to_owned().into(), text);
-        Ok(bytes)
+        let file = self.new_source_file(path.to_owned().into(), text);
+        Ok((
+            bytes,
+            Span::new(
+                file.start_pos,
+                BytePos(file.start_pos.0 + file.source_len.0),
+                SyntaxContext::root(),
+                None,
+            ),
+        ))
     }
 
     // By returning a `MonotonicVec`, we ensure that consumers cannot invalidate
@@ -314,7 +331,6 @@ impl SourceMap {
         cnum: CrateNum,
         file_local_lines: FreezeLock<SourceFileLines>,
         multibyte_chars: Vec<MultiByteChar>,
-        non_narrow_chars: Vec<NonNarrowChar>,
         normalized_pos: Vec<NormalizedPos>,
         metadata_index: u32,
     ) -> Lrc<SourceFile> {
@@ -332,7 +348,6 @@ impl SourceMap {
             source_len,
             lines: file_local_lines,
             multibyte_chars,
-            non_narrow_chars,
             normalized_pos,
             stable_id,
             cnum,
@@ -1044,6 +1059,10 @@ impl SourceMap {
         let span = self.next_point(span);
         if self.span_to_snippet(span).as_deref() == Ok(";") { Some(span) } else { None }
     }
+}
+
+pub fn get_source_map() -> Option<Lrc<SourceMap>> {
+    with_session_globals(|session_globals| session_globals.source_map.clone())
 }
 
 #[derive(Clone)]

@@ -9,15 +9,16 @@ use chalk_ir::{
 use chalk_solve::infer::ParameterEnaVariableExt;
 use either::Either;
 use ena::unify::UnifyKey;
-use hir_expand::name;
+use hir_expand::name::Name;
+use intern::sym;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use triomphe::Arc;
 
 use super::{InferOk, InferResult, InferenceContext, TypeError};
 use crate::{
-    consteval::unknown_const, db::HirDatabase, fold_generic_args, fold_tys_and_consts,
-    static_lifetime, to_chalk_trait_id, traits::FnTrait, AliasEq, AliasTy, BoundVar, Canonical,
+    consteval::unknown_const, db::HirDatabase, error_lifetime, fold_generic_args,
+    fold_tys_and_consts, to_chalk_trait_id, traits::FnTrait, AliasEq, AliasTy, BoundVar, Canonical,
     Const, ConstValue, DebruijnIndex, DomainGoal, GenericArg, GenericArgData, Goal, GoalData,
     Guidance, InEnvironment, InferenceVar, Interner, Lifetime, OpaqueTyId, ParamKind, ProjectionTy,
     ProjectionTyExt, Scalar, Solution, Substitution, TraitEnvironment, Ty, TyBuilder, TyExt,
@@ -43,40 +44,21 @@ impl InferenceContext<'_> {
         let obligations = pending_obligations
             .iter()
             .filter_map(|obligation| match obligation.value.value.goal.data(Interner) {
-                GoalData::DomainGoal(DomainGoal::Holds(
-                    clause @ WhereClause::AliasEq(AliasEq {
-                        alias: AliasTy::Projection(projection),
-                        ..
-                    }),
-                )) => {
-                    let projection_self = projection.self_type_parameter(self.db);
-                    let uncanonical = chalk_ir::Substitute::apply(
-                        &obligation.free_vars,
-                        projection_self,
-                        Interner,
-                    );
-                    if matches!(
-                        self.resolve_ty_shallow(&uncanonical).kind(Interner),
-                        TyKind::InferenceVar(iv, TyVariableKind::General) if *iv == root,
-                    ) {
-                        Some(chalk_ir::Substitute::apply(
-                            &obligation.free_vars,
-                            clause.clone(),
-                            Interner,
-                        ))
-                    } else {
-                        None
-                    }
-                }
-                GoalData::DomainGoal(DomainGoal::Holds(
-                    clause @ WhereClause::Implemented(trait_ref),
-                )) => {
-                    let trait_ref_self = trait_ref.self_type_parameter(Interner);
-                    let uncanonical = chalk_ir::Substitute::apply(
-                        &obligation.free_vars,
-                        trait_ref_self,
-                        Interner,
-                    );
+                GoalData::DomainGoal(DomainGoal::Holds(clause)) => {
+                    let ty = match clause {
+                        WhereClause::AliasEq(AliasEq {
+                            alias: AliasTy::Projection(projection),
+                            ..
+                        }) => projection.self_type_parameter(self.db),
+                        WhereClause::Implemented(trait_ref) => {
+                            trait_ref.self_type_parameter(Interner)
+                        }
+                        WhereClause::TypeOutlives(to) => to.ty.clone(),
+                        _ => return None,
+                    };
+
+                    let uncanonical =
+                        chalk_ir::Substitute::apply(&obligation.free_vars, ty, Interner);
                     if matches!(
                         self.resolve_ty_shallow(&uncanonical).kind(Interner),
                         TyKind::InferenceVar(iv, TyVariableKind::General) if *iv == root,
@@ -121,8 +103,9 @@ impl<T: HasInterner<Interner = Interner>> Canonicalized<T> {
                 VariableKind::Ty(TyVariableKind::General) => ctx.new_type_var().cast(Interner),
                 VariableKind::Ty(TyVariableKind::Integer) => ctx.new_integer_var().cast(Interner),
                 VariableKind::Ty(TyVariableKind::Float) => ctx.new_float_var().cast(Interner),
-                // Chalk can sometimes return new lifetime variables. We just use the static lifetime everywhere
-                VariableKind::Lifetime => static_lifetime().cast(Interner),
+                // Chalk can sometimes return new lifetime variables. We just replace them by errors
+                // for now.
+                VariableKind::Lifetime => error_lifetime().cast(Interner),
                 VariableKind::Const(ty) => ctx.new_const_var(ty.clone()).cast(Interner),
             }),
         );
@@ -631,8 +614,7 @@ impl<'a> InferenceTable<'a> {
     }
 
     pub(crate) fn resolve_obligations_as_possible(&mut self) {
-        let _span =
-            tracing::span!(tracing::Level::INFO, "resolve_obligations_as_possible").entered();
+        let _span = tracing::info_span!("resolve_obligations_as_possible").entered();
         let mut changed = true;
         let mut obligations = mem::take(&mut self.resolve_obligations_buffer);
         while mem::take(&mut changed) {
@@ -800,7 +782,8 @@ impl<'a> InferenceTable<'a> {
         let krate = self.trait_env.krate;
         let fn_once_trait = FnTrait::FnOnce.get_id(self.db, krate)?;
         let trait_data = self.db.trait_data(fn_once_trait);
-        let output_assoc_type = trait_data.associated_type_by_name(&name![Output])?;
+        let output_assoc_type =
+            trait_data.associated_type_by_name(&Name::new_symbol_root(sym::Output.clone()))?;
 
         let mut arg_tys = Vec::with_capacity(num_args);
         let arg_ty = TyBuilder::tuple(num_args)
@@ -815,19 +798,22 @@ impl<'a> InferenceTable<'a> {
             })
             .build();
 
-        let projection = {
-            let b = TyBuilder::subst_for_def(self.db, fn_once_trait, None);
-            if b.remaining() != 2 {
-                return None;
-            }
-            let fn_once_subst = b.push(ty.clone()).push(arg_ty).build();
+        let b = TyBuilder::trait_ref(self.db, fn_once_trait);
+        if b.remaining() != 2 {
+            return None;
+        }
+        let mut trait_ref = b.push(ty.clone()).push(arg_ty).build();
 
-            TyBuilder::assoc_type_projection(self.db, output_assoc_type, Some(fn_once_subst))
-                .build()
+        let projection = {
+            TyBuilder::assoc_type_projection(
+                self.db,
+                output_assoc_type,
+                Some(trait_ref.substitution.clone()),
+            )
+            .build()
         };
 
         let trait_env = self.trait_env.env.clone();
-        let mut trait_ref = projection.trait_ref(self.db);
         let obligation = InEnvironment {
             goal: trait_ref.clone().cast(Interner),
             environment: trait_env.clone(),
@@ -1020,11 +1006,11 @@ mod resolve {
             _var: InferenceVar,
             _outer_binder: DebruijnIndex,
         ) -> Lifetime {
-            // fall back all lifetimes to 'static -- currently we don't deal
+            // fall back all lifetimes to 'error -- currently we don't deal
             // with any lifetimes, but we can sometimes get some lifetime
             // variables through Chalk's unification, and this at least makes
             // sure we don't leak them outside of inference
-            crate::static_lifetime()
+            crate::error_lifetime()
         }
     }
 }

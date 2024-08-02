@@ -1,17 +1,17 @@
-use crate::BorrowckInferCtxt;
 use rustc_index::IndexSlice;
 use rustc_infer::infer::NllRegionVariableOrigin;
 use rustc_middle::mir::visit::{MutVisitor, TyContext};
 use rustc_middle::mir::{Body, ConstOperand, Location, Promoted};
-use rustc_middle::ty::GenericArgsRef;
-use rustc_middle::ty::{self, Ty, TyCtxt, TypeFoldable};
+use rustc_middle::ty::{self, GenericArgsRef, Ty, TyCtxt, TypeFoldable};
 use rustc_span::Symbol;
+
+use crate::BorrowckInferCtxt;
 
 /// Replaces all free regions appearing in the MIR with fresh
 /// inference variables, returning the number of variables created.
 #[instrument(skip(infcx, body, promoted), level = "debug")]
 pub fn renumber_mir<'tcx>(
-    infcx: &BorrowckInferCtxt<'_, 'tcx>,
+    infcx: &BorrowckInferCtxt<'tcx>,
     body: &mut Body<'tcx>,
     promoted: &mut IndexSlice<Promoted, Body<'tcx>>,
 ) {
@@ -26,9 +26,7 @@ pub fn renumber_mir<'tcx>(
     renumberer.visit_body(body);
 }
 
-// FIXME(@lcnr): A lot of these variants overlap and it seems like
-// this type is only used to decide which region should be used
-// as representative. This should be cleaned up.
+// The fields are used only for debugging output in `sccs_info`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub(crate) enum RegionCtxt {
     Location(Location),
@@ -57,7 +55,7 @@ impl RegionCtxt {
 }
 
 struct RegionRenumberer<'a, 'tcx> {
-    infcx: &'a BorrowckInferCtxt<'a, 'tcx>,
+    infcx: &'a BorrowckInferCtxt<'tcx>,
 }
 
 impl<'a, 'tcx> RegionRenumberer<'a, 'tcx> {
@@ -115,7 +113,7 @@ impl<'a, 'tcx> MutVisitor<'tcx> for RegionRenumberer<'a, 'tcx> {
     }
 
     #[instrument(skip(self), level = "debug")]
-    fn visit_constant(&mut self, constant: &mut ConstOperand<'tcx>, location: Location) {
+    fn visit_const_operand(&mut self, constant: &mut ConstOperand<'tcx>, location: Location) {
         let const_ = constant.const_;
         constant.const_ = self.renumber_regions(const_, || RegionCtxt::Location(location));
         debug!("constant: {:#?}", constant);

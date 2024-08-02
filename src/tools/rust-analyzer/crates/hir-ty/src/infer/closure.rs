@@ -15,18 +15,21 @@ use hir_def::{
     resolver::{resolver_for_expr, ResolveValueResult, ValueNs},
     DefWithBodyId, FieldId, HasModule, TupleFieldId, TupleId, VariantId,
 };
-use hir_expand::name;
+use hir_expand::name::Name;
+use intern::sym;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use stdx::never;
 
 use crate::{
     db::{HirDatabase, InternedClosure},
-    from_chalk_trait_id, from_placeholder_idx, make_binders,
+    error_lifetime, from_chalk_trait_id, from_placeholder_idx,
+    generics::Generics,
+    make_binders,
     mir::{BorrowKind, MirSpan, MutBorrowKind, ProjectionElem},
-    static_lifetime, to_chalk_trait_id,
+    to_chalk_trait_id,
     traits::FnTrait,
-    utils::{self, elaborate_clause_supertraits, generics, Generics},
+    utils::{self, elaborate_clause_supertraits},
     Adjust, Adjustment, AliasEq, AliasTy, Binders, BindingMode, ChalkTraitId, ClosureId, DynTy,
     DynTyExt, FnAbi, FnPointer, FnSig, Interner, OpaqueTy, ProjectionTyExt, Substitution, Ty,
     TyExt, WhereClause,
@@ -266,9 +269,7 @@ impl CapturedItem {
                     }
                     let variant_data = f.parent.variant_data(db.upcast());
                     let field = match &*variant_data {
-                        VariantData::Record(fields) => {
-                            fields[f.local_id].name.as_str().unwrap_or("[missing field]").to_owned()
-                        }
+                        VariantData::Record(fields) => fields[f.local_id].name.as_str().to_owned(),
                         VariantData::Tuple(fields) => fields
                             .iter()
                             .position(|it| it.0 == f.local_id)
@@ -324,24 +325,20 @@ impl CapturedItemWithoutTy {
                     BorrowKind::Mut { .. } => Mutability::Mut,
                     _ => Mutability::Not,
                 };
-                TyKind::Ref(m, static_lifetime(), ty).intern(Interner)
+                TyKind::Ref(m, error_lifetime(), ty).intern(Interner)
             }
         };
         return CapturedItem {
             place: self.place,
             kind: self.kind,
             span: self.span,
-            ty: replace_placeholder_with_binder(ctx.db, ctx.owner, ty),
+            ty: replace_placeholder_with_binder(ctx, ty),
         };
 
-        fn replace_placeholder_with_binder(
-            db: &dyn HirDatabase,
-            owner: DefWithBodyId,
-            ty: Ty,
-        ) -> Binders<Ty> {
+        fn replace_placeholder_with_binder(ctx: &mut InferenceContext<'_>, ty: Ty) -> Binders<Ty> {
             struct Filler<'a> {
                 db: &'a dyn HirDatabase,
-                generics: Generics,
+                generics: &'a Generics,
             }
             impl FallibleTypeFolder<Interner> for Filler<'_> {
                 type Error = ();
@@ -361,7 +358,7 @@ impl CapturedItemWithoutTy {
                     outer_binder: DebruijnIndex,
                 ) -> Result<chalk_ir::Const<Interner>, Self::Error> {
                     let x = from_placeholder_idx(self.db, idx);
-                    let Some(idx) = self.generics.param_idx(x) else {
+                    let Some(idx) = self.generics.type_or_const_param_idx(x) else {
                         return Err(());
                     };
                     Ok(BoundVar::new(outer_binder, idx).to_const(Interner, ty))
@@ -373,18 +370,18 @@ impl CapturedItemWithoutTy {
                     outer_binder: DebruijnIndex,
                 ) -> std::result::Result<Ty, Self::Error> {
                     let x = from_placeholder_idx(self.db, idx);
-                    let Some(idx) = self.generics.param_idx(x) else {
+                    let Some(idx) = self.generics.type_or_const_param_idx(x) else {
                         return Err(());
                     };
                     Ok(BoundVar::new(outer_binder, idx).to_ty(Interner))
                 }
             }
-            let Some(generic_def) = owner.as_generic_def_id() else {
+            let Some(generics) = ctx.generics() else {
                 return Binders::empty(Interner, ty);
             };
-            let filler = &mut Filler { db, generics: generics(db.upcast(), generic_def) };
+            let filler = &mut Filler { db: ctx.db, generics };
             let result = ty.clone().try_fold_with(filler, DebruijnIndex::INNERMOST).unwrap_or(ty);
-            make_binders(db, &filler.generics, result)
+            make_binders(ctx.db, filler.generics, result)
         }
     }
 }
@@ -623,8 +620,10 @@ impl InferenceContext<'_> {
                         if let Some(deref_trait) =
                             self.resolve_lang_item(LangItem::DerefMut).and_then(|it| it.as_trait())
                         {
-                            if let Some(deref_fn) =
-                                self.db.trait_data(deref_trait).method_by_name(&name![deref_mut])
+                            if let Some(deref_fn) = self
+                                .db
+                                .trait_data(deref_trait)
+                                .method_by_name(&Name::new_symbol_root(sym::deref_mut.clone()))
                             {
                                 break 'b deref_fn == f;
                             }
@@ -890,7 +889,7 @@ impl InferenceContext<'_> {
         match &self.body[pat] {
             Pat::Missing | Pat::Wild => (),
             Pat::Tuple { args, ellipsis } => {
-                let (al, ar) = args.split_at(ellipsis.unwrap_or(args.len()));
+                let (al, ar) = args.split_at(ellipsis.map_or(args.len(), |it| it as usize));
                 let field_count = match self.result[pat].kind(Interner) {
                     TyKind::Tuple(_, s) => s.len(Interner),
                     _ => return,
@@ -965,7 +964,7 @@ impl InferenceContext<'_> {
                     }
                     VariantId::StructId(s) => {
                         let vd = &*self.db.struct_data(s).variant_data;
-                        let (al, ar) = args.split_at(ellipsis.unwrap_or(args.len()));
+                        let (al, ar) = args.split_at(ellipsis.map_or(args.len(), |it| it as usize));
                         let fields = vd.fields().iter();
                         let it =
                             al.iter().zip(fields.clone()).chain(ar.iter().rev().zip(fields.rev()));

@@ -1,18 +1,15 @@
-use crate::ffi::CStr;
-use crate::io;
-use crate::num::NonZero;
-use crate::os::windows::io::AsRawHandle;
-use crate::os::windows::io::HandleOrNull;
-use crate::ptr;
-use crate::sys::c;
-use crate::sys::handle::Handle;
-use crate::sys::stack_overflow;
-use crate::sys_common::FromInner;
-use crate::time::Duration;
 use core::ffi::c_void;
 
 use super::time::WaitableTimer;
 use super::to_u16s;
+use crate::ffi::CStr;
+use crate::num::NonZero;
+use crate::os::windows::io::{AsRawHandle, HandleOrNull};
+use crate::sys::handle::Handle;
+use crate::sys::{c, stack_overflow};
+use crate::sys_common::FromInner;
+use crate::time::Duration;
+use crate::{io, ptr};
 
 pub const DEFAULT_MIN_STACK_SIZE: usize = 2 * 1024 * 1024;
 
@@ -27,31 +24,35 @@ impl Thread {
 
         // CreateThread rounds up values for the stack size to the nearest page size (at least 4kb).
         // If a value of zero is given then the default stack size is used instead.
-        let ret = c::CreateThread(
-            ptr::null_mut(),
-            stack,
-            Some(thread_start),
-            p as *mut _,
-            c::STACK_SIZE_PARAM_IS_A_RESERVATION,
-            ptr::null_mut(),
-        );
-        let ret = HandleOrNull::from_raw_handle(ret);
+        // SAFETY: `thread_start` has the right ABI for a thread's entry point.
+        // `p` is simply passed through to the new thread without being touched.
+        let ret = unsafe {
+            let ret = c::CreateThread(
+                ptr::null_mut(),
+                stack,
+                Some(thread_start),
+                p as *mut _,
+                c::STACK_SIZE_PARAM_IS_A_RESERVATION,
+                ptr::null_mut(),
+            );
+            HandleOrNull::from_raw_handle(ret)
+        };
         return if let Ok(handle) = ret.try_into() {
             Ok(Thread { handle: Handle::from_inner(handle) })
         } else {
             // The thread failed to start and as a result p was not consumed. Therefore, it is
             // safe to reconstruct the box so that it gets deallocated.
-            drop(Box::from_raw(p));
+            unsafe { drop(Box::from_raw(p)) };
             Err(io::Error::last_os_error())
         };
 
-        extern "system" fn thread_start(main: *mut c_void) -> c::DWORD {
-            unsafe {
-                // Next, reserve some stack space for if we otherwise run out of stack.
-                stack_overflow::reserve_stack();
-                // Finally, let's run some code.
-                Box::from_raw(main as *mut Box<dyn FnOnce()>)();
-            }
+        unsafe extern "system" fn thread_start(main: *mut c_void) -> u32 {
+            // Next, reserve some stack space for if we otherwise run out of stack.
+            stack_overflow::reserve_stack();
+            // Finally, let's run some code.
+            // SAFETY: We are simply recreating the box that was leaked earlier.
+            // It's the responsibility of the one who call `Thread::new` to ensure this is safe to call here.
+            unsafe { Box::from_raw(main as *mut Box<dyn FnOnce()>)() };
             0
         }
     }
@@ -60,10 +61,18 @@ impl Thread {
         if let Ok(utf8) = name.to_str() {
             if let Ok(utf16) = to_u16s(utf8) {
                 unsafe {
-                    c::SetThreadDescription(c::GetCurrentThread(), utf16.as_ptr());
-                };
+                    // SAFETY: the vec returned by `to_u16s` ends with a zero value
+                    Self::set_name_wide(&utf16)
+                }
             };
         };
+    }
+
+    /// # Safety
+    ///
+    /// `name` must end with a zero value
+    pub unsafe fn set_name_wide(name: &[u16]) {
+        unsafe { c::SetThreadDescription(c::GetCurrentThread(), name.as_ptr()) };
     }
 
     pub fn join(self) {
@@ -112,10 +121,7 @@ pub fn available_parallelism() -> io::Result<NonZero<usize>> {
         sysinfo.dwNumberOfProcessors as usize
     };
     match res {
-        0 => Err(io::const_io_error!(
-            io::ErrorKind::NotFound,
-            "The number of hardware threads is not known for the target platform",
-        )),
+        0 => Err(io::Error::UNKNOWN_THREAD_COUNT),
         cpus => Ok(unsafe { NonZero::new_unchecked(cpus) }),
     }
 }

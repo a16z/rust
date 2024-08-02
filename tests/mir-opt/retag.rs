@@ -1,5 +1,5 @@
 // skip-filecheck
-//@ unit-test: AddRetag
+//@ test-mir-pass: AddRetag
 // EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 // ignore-tidy-linelength
 //@ compile-flags: -Z mir-emit-retag -Z mir-opt-level=0 -Z span_free_formats
@@ -59,7 +59,9 @@ pub fn main() {
 fn array_casts() {
     let mut x: [usize; 2] = [0, 0];
     let p = &mut x as *mut usize;
-    unsafe { *p.add(1) = 1; }
+    unsafe {
+        *p.add(1) = 1;
+    }
 
     let x: [usize; 2] = [0, 1];
     let p = &x as *const usize;

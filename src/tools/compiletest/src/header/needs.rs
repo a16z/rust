@@ -100,9 +100,9 @@ pub(super) fn handle_needs(
             ignore_reason: "ignored when profiler support is disabled",
         },
         Need {
-            name: "needs-matching-clang",
+            name: "needs-force-clang-based-tests",
             condition: config.run_clang_based_tests_with.is_some(),
-            ignore_reason: "ignored when the used clang does not match the built LLVM",
+            ignore_reason: "ignored when RUSTBUILD_FORCE_CLANG_BASED_TESTS is not set",
         },
         Need {
             name: "needs-xray",
@@ -118,16 +118,6 @@ pub(super) fn handle_needs(
             name: "needs-rust-lldb",
             condition: config.debugger != Some(Debugger::Lldb) || config.lldb_native_rust,
             ignore_reason: "ignored on targets without Rust's LLDB",
-        },
-        Need {
-            name: "needs-i686-dlltool",
-            condition: cache.i686_dlltool,
-            ignore_reason: "ignored when dlltool for i686 is not present",
-        },
-        Need {
-            name: "needs-x86_64-dlltool",
-            condition: cache.x86_64_dlltool,
-            ignore_reason: "ignored when dlltool for x86_64 is not present",
         },
         Need {
             name: "needs-dlltool",
@@ -153,6 +143,11 @@ pub(super) fn handle_needs(
             name: "needs-wasmtime",
             condition: config.runner.as_ref().is_some_and(|r| r.contains("wasmtime")),
             ignore_reason: "ignored when wasmtime runner is not available",
+        },
+        Need {
+            name: "needs-symlink",
+            condition: cache.symlinks,
+            ignore_reason: "ignored if symlinks are unavailable",
         },
     ];
 
@@ -218,27 +213,12 @@ pub(super) struct CachedNeedsConditions {
     profiler_support: bool,
     xray: bool,
     rust_lld: bool,
-    i686_dlltool: bool,
-    x86_64_dlltool: bool,
     dlltool: bool,
+    symlinks: bool,
 }
 
 impl CachedNeedsConditions {
     pub(super) fn load(config: &Config) -> Self {
-        let path = std::env::var_os("PATH").expect("missing PATH environment variable");
-        let path = std::env::split_paths(&path).collect::<Vec<_>>();
-
-        // On Windows, dlltool.exe is used for all architectures.
-        #[cfg(windows)]
-        let dlltool = path.iter().any(|dir| dir.join("dlltool.exe").is_file());
-
-        // For non-Windows, there are architecture specific dlltool binaries.
-        #[cfg(not(windows))]
-        let i686_dlltool = path.iter().any(|dir| dir.join("i686-w64-mingw32-dlltool").is_file());
-        #[cfg(not(windows))]
-        let x86_64_dlltool =
-            path.iter().any(|dir| dir.join("x86_64-w64-mingw32-dlltool").is_file());
-
         let target = &&*config.target;
         let sanitizers = &config.target_cfg().sanitizers;
         Self {
@@ -278,26 +258,50 @@ impl CachedNeedsConditions {
                 .join(if config.host.contains("windows") { "rust-lld.exe" } else { "rust-lld" })
                 .exists(),
 
-            #[cfg(windows)]
-            i686_dlltool: dlltool,
-            #[cfg(windows)]
-            x86_64_dlltool: dlltool,
-            #[cfg(windows)]
-            dlltool,
-
-            // For non-Windows, there are architecture specific dlltool binaries.
-            #[cfg(not(windows))]
-            i686_dlltool,
-            #[cfg(not(windows))]
-            x86_64_dlltool,
-            #[cfg(not(windows))]
-            dlltool: if config.matches_arch("x86") {
-                i686_dlltool
-            } else if config.matches_arch("x86_64") {
-                x86_64_dlltool
-            } else {
-                false
-            },
+            dlltool: find_dlltool(&config),
+            symlinks: has_symlinks(),
         }
     }
+}
+
+fn find_dlltool(config: &Config) -> bool {
+    let path = std::env::var_os("PATH").expect("missing PATH environment variable");
+    let path = std::env::split_paths(&path).collect::<Vec<_>>();
+
+    // dlltool is used ony by GNU based `*-*-windows-gnu`
+    if !(config.matches_os("windows") && config.matches_env("gnu") && config.matches_abi("")) {
+        return false;
+    }
+
+    // On Windows, dlltool.exe is used for all architectures.
+    // For non-Windows, there are architecture specific dlltool binaries.
+    let dlltool_found = if cfg!(windows) {
+        path.iter().any(|dir| dir.join("dlltool.exe").is_file())
+    } else if config.matches_arch("i686") {
+        path.iter().any(|dir| dir.join("i686-w64-mingw32-dlltool").is_file())
+    } else if config.matches_arch("x86_64") {
+        path.iter().any(|dir| dir.join("x86_64-w64-mingw32-dlltool").is_file())
+    } else {
+        false
+    };
+    dlltool_found
+}
+
+#[cfg(windows)]
+fn has_symlinks() -> bool {
+    if std::env::var_os("CI").is_some() {
+        return true;
+    }
+    let link = std::env::temp_dir().join("RUST_COMPILETEST_SYMLINK_CHECK");
+    if std::os::windows::fs::symlink_file("DOES NOT EXIST", &link).is_ok() {
+        std::fs::remove_file(&link).unwrap();
+        true
+    } else {
+        false
+    }
+}
+
+#[cfg(not(windows))]
+fn has_symlinks() -> bool {
+    true
 }

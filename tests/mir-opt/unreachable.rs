@@ -1,4 +1,4 @@
-//@ unit-test: UnreachablePropagation
+//@ test-mir-pass: UnreachablePropagation
 // EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 
 enum Empty {}
@@ -35,7 +35,7 @@ fn if_let() {
             _y = 42;
         }
 
-        match _x { }
+        match _x {}
     }
 }
 
@@ -56,7 +56,7 @@ fn as_match() {
     // CHECK: return;
     match empty() {
         None => {}
-        Some(_x) => match _x {}
+        Some(_x) => match _x {},
     }
 }
 

@@ -1,4 +1,5 @@
-//@ unit-test: DataflowConstProp
+//@ test-mir-pass: DataflowConstProp
+//@ compile-flags: -Zdump-mir-exclude-alloc-bytes
 // EMIT_MIR_FOR_EACH_BIT_WIDTH
 
 // EMIT_MIR tuple.main.DataflowConstProp.diff

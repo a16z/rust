@@ -1,7 +1,6 @@
+use super::display_buffer::DisplayBuffer;
 use crate::fmt::{self, Write};
 use crate::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
-use super::display_buffer::DisplayBuffer;
 
 /// An internet socket address, either IPv4 or IPv6.
 ///
@@ -591,7 +590,7 @@ impl fmt::Display for SocketAddrV4 {
         if f.precision().is_none() && f.width().is_none() {
             write!(f, "{}:{}", self.ip(), self.port())
         } else {
-            const LONGEST_IPV4_SOCKET_ADDR: &str = "255.255.255.255:65536";
+            const LONGEST_IPV4_SOCKET_ADDR: &str = "255.255.255.255:65535";
 
             let mut buf = DisplayBuffer::<{ LONGEST_IPV4_SOCKET_ADDR.len() }>::new();
             // Buffer is long enough for the longest possible IPv4 socket address, so this should never fail.
@@ -621,7 +620,7 @@ impl fmt::Display for SocketAddrV6 {
             }
         } else {
             const LONGEST_IPV6_SOCKET_ADDR: &str =
-                "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967296]:65536";
+                "[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff%4294967295]:65535";
 
             let mut buf = DisplayBuffer::<{ LONGEST_IPV6_SOCKET_ADDR.len() }>::new();
             match self.scope_id() {

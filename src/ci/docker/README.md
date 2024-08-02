@@ -14,7 +14,7 @@ for example:
 ./src/ci/docker/run.sh x86_64-gnu
 ```
 
-Images will output artifacts in an `obj` dir at the root of a repository. Note
+Images will output artifacts in an `obj/$image_name` dir at the root of a repository. Note
 that the script will overwrite the contents of this directory.
 
 To match conditions in rusts CI, also set the environment variable `DEPLOY=1`, e.g.:
@@ -22,12 +22,9 @@ To match conditions in rusts CI, also set the environment variable `DEPLOY=1`, e
 DEPLOY=1 ./src/ci/docker/run.sh x86_64-gnu
 ```
 
-**NOTE**: Re-using the same `obj` dir with different docker images with
-the same target triple (e.g. `dist-x86_64-linux` and `dist-various-1`)
-may result in strange linker errors, due shared library versions differing between platforms.
-
-If you encounter any issues when using multiple Docker images, try deleting your `obj` directory
-before running your command.
+**NOTE**: In CI, the script outputs the artifacts to the `obj` directory,
+while locally, to the `obj/$image_name` directory. This is primarily to prevent
+strange linker errors when using multiple Docker images.
 
 ## Filesystem layout
 
@@ -236,7 +233,7 @@ For targets: `aarch64-unknown-linux-gnu`
 - Operating System > Linux kernel version = 4.1.49
 - Binary utilities > Version of binutils = 2.29.1
 - C-library > glibc version = 2.17 -- aarch64 support was introduced in this version
-- C compiler > gcc version = 8.5.0
+- C compiler > gcc version = 13.2.0
 - C compiler > C++ = ENABLE -- to cross compile LLVM
 
 ### `i586-linux-gnu.defconfig`
@@ -271,6 +268,22 @@ For targets: `loongarch64-unknown-linux-gnu`
 - Operating System > Linux kernel version = 5.19.16
 - Binary utilities > Version of binutils = 2.40
 - C-library > glibc version = 2.36
+- C compiler > gcc version = 13.2.0
+- C compiler > C++ = ENABLE -- to cross compile LLVM
+
+### `loongarch64-linux-musl.defconfig`
+
+For targets: `loongarch64-unknown-linux-musl`
+
+- Path and misc options > Prefix directory = /x-tools/${CT\_TARGET}
+- Path and misc options > Use a mirror = ENABLE
+- Path and misc options > Base URL = https://ci-mirrors.rust-lang.org/rustc
+- Target options > Target Architecture = loongarch
+- Target options > Bitness = 64-bit
+- Operating System > Target OS = linux
+- Operating System > Linux kernel version = 5.19.16
+- Binary utilities > Version of binutils = 2.41
+- C-library > musl version = 1.2.5
 - C compiler > gcc version = 13.2.0
 - C compiler > C++ = ENABLE -- to cross compile LLVM
 

@@ -7,11 +7,11 @@ use clippy_utils::{
     can_move_expr_to_closure, is_else_clause, is_lint_allowed, is_res_lang_ctor, path_res, path_to_local_id,
     peel_blocks, peel_hir_expr_refs, peel_hir_expr_while, CaptureKind,
 };
-use rustc_ast::util::parser::PREC_POSTFIX;
+use rustc_ast::util::parser::PREC_UNAMBIGUOUS;
 use rustc_errors::Applicability;
 use rustc_hir::def::Res;
 use rustc_hir::LangItem::{OptionNone, OptionSome};
-use rustc_hir::{BindingAnnotation, Expr, ExprKind, HirId, Mutability, Pat, PatKind, Path, QPath};
+use rustc_hir::{BindingMode, Expr, ExprKind, HirId, Mutability, Pat, PatKind, Path, QPath};
 use rustc_lint::LateContext;
 use rustc_span::{sym, SyntaxContext};
 
@@ -117,7 +117,7 @@ where
     // it's being passed by value.
     let scrutinee = peel_hir_expr_refs(scrutinee).0;
     let (scrutinee_str, _) = snippet_with_context(cx, scrutinee.span, expr_ctxt, "..", &mut app);
-    let scrutinee_str = if scrutinee.span.eq_ctxt(expr.span) && scrutinee.precedence().order() < PREC_POSTFIX {
+    let scrutinee_str = if scrutinee.span.eq_ctxt(expr.span) && scrutinee.precedence().order() < PREC_UNAMBIGUOUS {
         format!("({scrutinee_str})")
     } else {
         scrutinee_str.into()
@@ -139,7 +139,7 @@ where
             }
 
             // `ref` and `ref mut` annotations were handled earlier.
-            let annotation = if matches!(annotation, BindingAnnotation::MUT) {
+            let annotation = if matches!(annotation, BindingMode::MUT) {
                 "mut "
             } else {
                 ""

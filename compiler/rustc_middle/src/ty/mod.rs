@@ -11,12 +11,101 @@
 
 #![allow(rustc::usage_of_ty_tykind)]
 
+use std::assert_matches::assert_matches;
+use std::fmt::Debug;
+use std::hash::{Hash, Hasher};
+use std::marker::PhantomData;
+use std::num::NonZero;
+use std::ptr::NonNull;
+use std::{fmt, mem, str};
+
+pub use adt::*;
+pub use assoc::*;
+pub use generic_args::{GenericArgKind, TermKind, *};
+pub use generics::*;
+pub use intrinsic::IntrinsicDef;
+use rustc_ast::expand::StrippedCfgItem;
+use rustc_ast::node_id::NodeMap;
+pub use rustc_ast_ir::{try_visit, Movability, Mutability};
+use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap, FxIndexSet};
+use rustc_data_structures::intern::Interned;
+use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_data_structures::steal::Steal;
+use rustc_data_structures::tagged_ptr::CopyTaggedPtr;
+use rustc_errors::{Diag, ErrorGuaranteed, StashKey};
+use rustc_hir::def::{CtorKind, CtorOf, DefKind, DocLinkResMap, LifetimeRes, Res};
+use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, LocalDefId, LocalDefIdMap};
+use rustc_index::IndexVec;
+use rustc_macros::{
+    extension, Decodable, Encodable, HashStable, TyDecodable, TyEncodable, TypeFoldable,
+    TypeVisitable,
+};
+use rustc_query_system::ich::StableHashingContext;
+use rustc_serialize::{Decodable, Encodable};
+use rustc_session::lint::LintBuffer;
+pub use rustc_session::lint::RegisteredTools;
+use rustc_span::hygiene::MacroKind;
+use rustc_span::symbol::{kw, sym, Ident, Symbol};
+use rustc_span::{ExpnId, ExpnKind, Span};
+use rustc_target::abi::{Align, FieldIdx, Integer, IntegerType, VariantIdx};
+pub use rustc_target::abi::{ReprFlags, ReprOptions};
+pub use rustc_type_ir::relate::VarianceDiagInfo;
+pub use rustc_type_ir::ConstKind::{
+    Bound as BoundCt, Error as ErrorCt, Expr as ExprCt, Infer as InferCt, Param as ParamCt,
+    Placeholder as PlaceholderCt, Unevaluated, Value,
+};
+pub use rustc_type_ir::*;
+use tracing::{debug, instrument};
+pub use vtable::*;
+use {rustc_ast as ast, rustc_attr as attr, rustc_hir as hir};
+
+pub use self::closure::{
+    analyze_coroutine_closure_captures, is_ancestor_or_same_capture, place_to_string_for_capture,
+    BorrowKind, CaptureInfo, CapturedPlace, ClosureTypeInfo, MinCaptureInformationMap,
+    MinCaptureList, RootVariableMinCaptureList, UpvarCapture, UpvarId, UpvarPath,
+    CAPTURE_STRUCT_LOCAL,
+};
+pub use self::consts::{
+    Const, ConstInt, ConstKind, Expr, ExprKind, FeedConstTy, ScalarInt, UnevaluatedConst, ValTree,
+};
+pub use self::context::{
+    tls, CtxtInterners, CurrentGcx, DeducedParamAttrs, Feed, FreeRegionInfo, GlobalCtxt, Lift,
+    TyCtxt, TyCtxtFeed,
+};
 pub use self::fold::{FallibleTypeFolder, TypeFoldable, TypeFolder, TypeSuperFoldable};
+pub use self::instance::{Instance, InstanceKind, ReifyReason, ShortInstance, UnusedGenericParams};
+pub use self::list::{List, ListWithCachedTypeInfo};
+pub use self::opaque_types::OpaqueTypeKey;
+pub use self::parameterized::ParameterizedOverTcx;
+pub use self::pattern::{Pattern, PatternKind};
+pub use self::predicate::{
+    AliasTerm, Clause, ClauseKind, CoercePredicate, ExistentialPredicate,
+    ExistentialPredicateStableCmpExt, ExistentialProjection, ExistentialTraitRef, NormalizesTo,
+    OutlivesPredicate, PolyCoercePredicate, PolyExistentialPredicate, PolyExistentialProjection,
+    PolyExistentialTraitRef, PolyProjectionPredicate, PolyRegionOutlivesPredicate,
+    PolySubtypePredicate, PolyTraitPredicate, PolyTraitRef, PolyTypeOutlivesPredicate, Predicate,
+    PredicateKind, ProjectionPredicate, RegionOutlivesPredicate, SubtypePredicate, ToPolyTraitRef,
+    TraitPredicate, TraitRef, TypeOutlivesPredicate,
+};
+pub use self::region::BoundRegionKind::*;
+pub use self::region::{
+    BoundRegion, BoundRegionKind, EarlyParamRegion, LateParamRegion, Region, RegionKind, RegionVid,
+};
+pub use self::rvalue_scopes::RvalueScopes;
+pub use self::sty::{
+    AliasTy, Article, Binder, BoundTy, BoundTyKind, BoundVariableKind, CanonicalPolyFnSig,
+    CoroutineArgsExt, EarlyBinder, FnSig, InlineConstArgs, InlineConstArgsParts, ParamConst,
+    ParamTy, PolyFnSig, TyKind, TypeAndMut, UpvarArgs,
+};
+pub use self::trait_def::TraitDef;
+pub use self::typeck_results::{
+    CanonicalUserType, CanonicalUserTypeAnnotation, CanonicalUserTypeAnnotations, IsIdentity,
+    TypeckResults, UserType, UserTypeAnnotationIndex,
+};
 pub use self::visit::{TypeSuperVisitable, TypeVisitable, TypeVisitableExt, TypeVisitor};
 pub use self::AssocItemContainer::*;
 pub use self::BorrowKind::*;
 pub use self::IntVarValue::*;
-pub use self::Variance::*;
 use crate::error::{OpaqueHiddenTypeMismatch, TypeMismatchReason};
 use crate::metadata::ModChild;
 use crate::middle::privacy::EffectiveVisibilities;
@@ -24,102 +113,10 @@ use crate::mir::{Body, CoroutineLayout};
 use crate::query::Providers;
 use crate::traits::{self, Reveal};
 use crate::ty;
+pub use crate::ty::diagnostics::*;
 use crate::ty::fast_reject::SimplifiedType;
 use crate::ty::util::Discr;
-pub use adt::*;
-pub use assoc::*;
-pub use generic_args::*;
-pub use generics::*;
-pub use intrinsic::IntrinsicDef;
-use rustc_ast as ast;
-use rustc_ast::expand::StrippedCfgItem;
-use rustc_ast::node_id::NodeMap;
-pub use rustc_ast_ir::{try_visit, Movability, Mutability};
-use rustc_attr as attr;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet, FxIndexMap, FxIndexSet};
-use rustc_data_structures::intern::Interned;
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_data_structures::steal::Steal;
-use rustc_data_structures::tagged_ptr::CopyTaggedPtr;
-use rustc_data_structures::unord::UnordMap;
-use rustc_errors::{Diag, ErrorGuaranteed, StashKey};
-use rustc_hir as hir;
-use rustc_hir::def::{CtorKind, CtorOf, DefKind, DocLinkResMap, LifetimeRes, Res};
-use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, LocalDefId, LocalDefIdMap, LocalDefIdSet};
-use rustc_index::IndexVec;
-use rustc_macros::HashStable;
-use rustc_query_system::ich::StableHashingContext;
-use rustc_serialize::{Decodable, Encodable};
-use rustc_session::lint::LintBuffer;
-pub use rustc_session::lint::RegisteredTools;
-use rustc_span::hygiene::MacroKind;
-use rustc_span::symbol::{kw, sym, Ident, Symbol};
-use rustc_span::{hygiene, ExpnId, ExpnKind, Span};
-use rustc_target::abi::{Align, FieldIdx, Integer, IntegerType, VariantIdx};
-pub use rustc_target::abi::{ReprFlags, ReprOptions};
-pub use rustc_type_ir::{DebugWithInfcx, InferCtxtLike, WithInfcx};
-pub use vtable::*;
 
-use std::assert_matches::assert_matches;
-use std::fmt::Debug;
-use std::hash::{Hash, Hasher};
-use std::marker::PhantomData;
-use std::mem;
-use std::num::NonZero;
-use std::ptr::NonNull;
-use std::{fmt, str};
-
-pub use crate::ty::diagnostics::*;
-pub use rustc_type_ir::ConstKind::{
-    Bound as BoundCt, Error as ErrorCt, Expr as ExprCt, Infer as InferCt, Param as ParamCt,
-    Placeholder as PlaceholderCt, Unevaluated, Value,
-};
-pub use rustc_type_ir::*;
-
-pub use self::closure::{
-    is_ancestor_or_same_capture, place_to_string_for_capture, BorrowKind, CaptureInfo,
-    CapturedPlace, ClosureTypeInfo, MinCaptureInformationMap, MinCaptureList,
-    RootVariableMinCaptureList, UpvarCapture, UpvarId, UpvarPath, CAPTURE_STRUCT_LOCAL,
-};
-pub use self::consts::{
-    Const, ConstData, ConstInt, ConstKind, Expr, ScalarInt, UnevaluatedConst, ValTree,
-};
-pub use self::context::{
-    tls, CtxtInterners, CurrentGcx, DeducedParamAttrs, Feed, FreeRegionInfo, GlobalCtxt, Lift,
-    TyCtxt, TyCtxtFeed,
-};
-pub use self::instance::{Instance, InstanceDef, ReifyReason, ShortInstance, UnusedGenericParams};
-pub use self::list::{List, ListWithCachedTypeInfo};
-pub use self::parameterized::ParameterizedOverTcx;
-pub use self::pattern::{Pattern, PatternKind};
-pub use self::predicate::{
-    Clause, ClauseKind, CoercePredicate, ExistentialPredicate, ExistentialProjection,
-    ExistentialTraitRef, NormalizesTo, OutlivesPredicate, PolyCoercePredicate,
-    PolyExistentialPredicate, PolyExistentialProjection, PolyExistentialTraitRef,
-    PolyProjectionPredicate, PolyRegionOutlivesPredicate, PolySubtypePredicate, PolyTraitPredicate,
-    PolyTraitRef, PolyTypeOutlivesPredicate, Predicate, PredicateKind, ProjectionPredicate,
-    RegionOutlivesPredicate, SubtypePredicate, ToPolyTraitRef, ToPredicate, TraitPredicate,
-    TraitRef, TypeOutlivesPredicate,
-};
-pub use self::region::{
-    BoundRegion, BoundRegionKind, BoundRegionKind::*, EarlyParamRegion, LateParamRegion, Region,
-    RegionKind, RegionVid,
-};
-pub use self::rvalue_scopes::RvalueScopes;
-pub use self::sty::{
-    AliasTy, Article, Binder, BoundTy, BoundTyKind, BoundVariableKind, CanonicalPolyFnSig,
-    ClosureArgs, ClosureArgsParts, CoroutineArgs, CoroutineArgsParts, CoroutineClosureArgs,
-    CoroutineClosureArgsParts, CoroutineClosureSignature, FnSig, GenSig, InlineConstArgs,
-    InlineConstArgsParts, ParamConst, ParamTy, PolyFnSig, TyKind, TypeAndMut, UpvarArgs,
-    VarianceDiagInfo,
-};
-pub use self::trait_def::TraitDef;
-pub use self::typeck_results::{
-    CanonicalUserType, CanonicalUserTypeAnnotation, CanonicalUserTypeAnnotations, IsIdentity,
-    TypeckResults, UserType, UserTypeAnnotationIndex,
-};
-
-pub mod _match;
 pub mod abstract_const;
 pub mod adjustment;
 pub mod cast;
@@ -146,6 +143,7 @@ mod closure;
 mod consts;
 mod context;
 mod diagnostics;
+mod elaborate_impl;
 mod erase_regions;
 mod generic_args;
 mod generics;
@@ -223,8 +221,15 @@ pub struct ResolverAstLowering {
     pub lint_buffer: Steal<LintBuffer>,
 
     /// Information about functions signatures for delegation items expansion
-    pub has_self: LocalDefIdSet,
-    pub fn_parameter_counts: LocalDefIdMap<usize>,
+    pub delegation_fn_sigs: LocalDefIdMap<DelegationFnSig>,
+}
+
+#[derive(Debug)]
+pub struct DelegationFnSig {
+    pub header: ast::FnHeader,
+    pub param_count: usize,
+    pub has_self: bool,
+    pub c_variadic: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -254,70 +259,15 @@ pub struct ImplHeader<'tcx> {
 
 #[derive(Copy, Clone, Debug, TyEncodable, TyDecodable, HashStable)]
 pub struct ImplTraitHeader<'tcx> {
-    pub trait_ref: ty::EarlyBinder<ty::TraitRef<'tcx>>,
+    pub trait_ref: ty::EarlyBinder<'tcx, ty::TraitRef<'tcx>>,
     pub polarity: ImplPolarity,
-    pub unsafety: hir::Unsafety,
+    pub safety: hir::Safety,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Debug, TypeFoldable, TypeVisitable)]
 pub enum ImplSubject<'tcx> {
     Trait(TraitRef<'tcx>),
     Inherent(Ty<'tcx>),
-}
-
-#[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable, HashStable, Debug)]
-#[derive(TypeFoldable, TypeVisitable)]
-pub enum ImplPolarity {
-    /// `impl Trait for Type`
-    Positive,
-    /// `impl !Trait for Type`
-    Negative,
-    /// `#[rustc_reservation_impl] impl Trait for Type`
-    ///
-    /// This is a "stability hack", not a real Rust feature.
-    /// See #64631 for details.
-    Reservation,
-}
-
-impl fmt::Display for ImplPolarity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Positive => f.write_str("positive"),
-            Self::Negative => f.write_str("negative"),
-            Self::Reservation => f.write_str("reservation"),
-        }
-    }
-}
-
-/// Polarity for a trait predicate. May either be negative or positive.
-/// Distinguished from [`ImplPolarity`] since we never compute goals with
-/// "reservation" level.
-#[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable, HashStable, Debug)]
-#[derive(TypeFoldable, TypeVisitable)]
-pub enum PredicatePolarity {
-    /// `Type: Trait`
-    Positive,
-    /// `Type: !Trait`
-    Negative,
-}
-
-impl PredicatePolarity {
-    /// Flips polarity by turning `Positive` into `Negative` and `Negative` into `Positive`.
-    pub fn flip(&self) -> PredicatePolarity {
-        match self {
-            PredicatePolarity::Positive => PredicatePolarity::Negative,
-            PredicatePolarity::Negative => PredicatePolarity::Positive,
-        }
-    }
-}
-
-impl fmt::Display for PredicatePolarity {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Positive => f.write_str("positive"),
-            Self::Negative => f.write_str("negative"),
-        }
-    }
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable, HashStable, Debug)]
@@ -354,38 +304,6 @@ impl Visibility {
                 }
             }
             ty::Visibility::Public => "pub".to_string(),
-        }
-    }
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, HashStable, TyEncodable, TyDecodable)]
-pub enum BoundConstness {
-    /// `Type: Trait`
-    NotConst,
-    /// `Type: const Trait`
-    Const,
-    /// `Type: ~const Trait`
-    ///
-    /// Requires resolving to const only when we are in a const context.
-    ConstIfConst,
-}
-
-impl BoundConstness {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::NotConst => "",
-            Self::Const => "const",
-            Self::ConstIfConst => "~const",
-        }
-    }
-}
-
-impl fmt::Display for BoundConstness {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NotConst => f.write_str("normal"),
-            Self::Const => f.write_str("const"),
-            Self::ConstIfConst => f.write_str("~const"),
         }
     }
 }
@@ -520,7 +438,7 @@ pub struct CReaderCacheKey {
 #[rustc_pass_by_value]
 pub struct Ty<'tcx>(Interned<'tcx, WithCachedTypeInfo<TyKind<'tcx>>>);
 
-impl<'tcx> IntoKind for Ty<'tcx> {
+impl<'tcx> rustc_type_ir::inherent::IntoKind for Ty<'tcx> {
     type Kind = TyKind<'tcx>;
 
     fn kind(self) -> TyKind<'tcx> {
@@ -566,6 +484,16 @@ pub struct Term<'tcx> {
     marker: PhantomData<(Ty<'tcx>, Const<'tcx>)>,
 }
 
+impl<'tcx> rustc_type_ir::inherent::Term<TyCtxt<'tcx>> for Term<'tcx> {}
+
+impl<'tcx> rustc_type_ir::inherent::IntoKind for Term<'tcx> {
+    type Kind = TermKind<'tcx>;
+
+    fn kind(self) -> Self::Kind {
+        self.unpack()
+    }
+}
+
 #[cfg(parallel_compiler)]
 unsafe impl<'tcx> rustc_data_structures::sync::DynSend for Term<'tcx> where
     &'tcx (Ty<'tcx>, Const<'tcx>): rustc_data_structures::sync::DynSend
@@ -581,14 +509,10 @@ unsafe impl<'tcx> Sync for Term<'tcx> where &'tcx (Ty<'tcx>, Const<'tcx>): Sync 
 
 impl Debug for Term<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let data = if let Some(ty) = self.ty() {
-            format!("Term::Ty({ty:?})")
-        } else if let Some(ct) = self.ct() {
-            format!("Term::Ct({ct:?})")
-        } else {
-            unreachable!()
-        };
-        f.write_str(&data)
+        match self.unpack() {
+            TermKind::Ty(ty) => write!(f, "Term::Ty({ty:?})"),
+            TermKind::Const(ct) => write!(f, "Term::Const({ct:?})"),
+        }
     }
 }
 
@@ -615,13 +539,19 @@ impl<'tcx> TypeFoldable<TyCtxt<'tcx>> for Term<'tcx> {
         self,
         folder: &mut F,
     ) -> Result<Self, F::Error> {
-        Ok(self.unpack().try_fold_with(folder)?.pack())
+        match self.unpack() {
+            ty::TermKind::Ty(ty) => ty.try_fold_with(folder).map(Into::into),
+            ty::TermKind::Const(ct) => ct.try_fold_with(folder).map(Into::into),
+        }
     }
 }
 
 impl<'tcx> TypeVisitable<TyCtxt<'tcx>> for Term<'tcx> {
     fn visit_with<V: TypeVisitor<TyCtxt<'tcx>>>(&self, visitor: &mut V) -> V::Result {
-        self.unpack().visit_with(visitor)
+        match self.unpack() {
+            ty::TermKind::Ty(ty) => ty.visit_with(visitor),
+            ty::TermKind::Const(ct) => ct.visit_with(visitor),
+        }
     }
 }
 
@@ -652,19 +582,27 @@ impl<'tcx> Term<'tcx> {
                     ptr.cast::<WithCachedTypeInfo<ty::TyKind<'tcx>>>().as_ref(),
                 ))),
                 CONST_TAG => TermKind::Const(ty::Const(Interned::new_unchecked(
-                    ptr.cast::<WithCachedTypeInfo<ty::ConstData<'tcx>>>().as_ref(),
+                    ptr.cast::<WithCachedTypeInfo<ty::ConstKind<'tcx>>>().as_ref(),
                 ))),
                 _ => core::intrinsics::unreachable(),
             }
         }
     }
 
-    pub fn ty(&self) -> Option<Ty<'tcx>> {
+    pub fn as_type(&self) -> Option<Ty<'tcx>> {
         if let TermKind::Ty(ty) = self.unpack() { Some(ty) } else { None }
     }
 
-    pub fn ct(&self) -> Option<Const<'tcx>> {
+    pub fn expect_type(&self) -> Ty<'tcx> {
+        self.as_type().expect("expected a type, but found a const")
+    }
+
+    pub fn as_const(&self) -> Option<Const<'tcx>> {
         if let TermKind::Const(c) = self.unpack() { Some(c) } else { None }
+    }
+
+    pub fn expect_const(&self) -> Const<'tcx> {
+        self.as_const().expect("expected a const, but found a type")
     }
 
     pub fn into_arg(self) -> GenericArg<'tcx> {
@@ -674,15 +612,14 @@ impl<'tcx> Term<'tcx> {
         }
     }
 
-    /// This function returns the inner `AliasTy` for a `ty::Alias` or `ConstKind::Unevaluated`.
-    pub fn to_alias_ty(&self, tcx: TyCtxt<'tcx>) -> Option<AliasTy<'tcx>> {
+    pub fn to_alias_term(self) -> Option<AliasTerm<'tcx>> {
         match self.unpack() {
             TermKind::Ty(ty) => match *ty.kind() {
-                ty::Alias(_kind, alias_ty) => Some(alias_ty),
+                ty::Alias(_kind, alias_ty) => Some(alias_ty.into()),
                 _ => None,
             },
             TermKind::Const(ct) => match ct.kind() {
-                ConstKind::Unevaluated(uv) => Some(AliasTy::new(tcx, uv.def, uv.args)),
+                ConstKind::Unevaluated(uv) => Some(uv.into()),
                 _ => None,
             },
         }
@@ -700,13 +637,7 @@ const TAG_MASK: usize = 0b11;
 const TYPE_TAG: usize = 0b00;
 const CONST_TAG: usize = 0b01;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash, TyEncodable, TyDecodable)]
-#[derive(HashStable, TypeFoldable, TypeVisitable)]
-pub enum TermKind<'tcx> {
-    Ty(Ty<'tcx>),
-    Const(Const<'tcx>),
-}
-
+#[extension(pub trait TermKindPackExt<'tcx>)]
 impl<'tcx> TermKind<'tcx> {
     #[inline]
     fn pack(self) -> Term<'tcx> {
@@ -824,45 +755,6 @@ impl<'a, 'tcx> IntoIterator for &'a InstantiatedPredicates<'tcx> {
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, HashStable, TyEncodable, TyDecodable)]
-#[derive(TypeFoldable, TypeVisitable)]
-pub struct OpaqueTypeKey<'tcx> {
-    pub def_id: LocalDefId,
-    pub args: GenericArgsRef<'tcx>,
-}
-
-impl<'tcx> OpaqueTypeKey<'tcx> {
-    pub fn iter_captured_args(
-        self,
-        tcx: TyCtxt<'tcx>,
-    ) -> impl Iterator<Item = (usize, GenericArg<'tcx>)> {
-        std::iter::zip(self.args, tcx.variances_of(self.def_id)).enumerate().filter_map(
-            |(i, (arg, v))| match (arg.unpack(), v) {
-                (_, ty::Invariant) => Some((i, arg)),
-                (ty::GenericArgKind::Lifetime(_), ty::Bivariant) => None,
-                _ => bug!("unexpected opaque type arg variance"),
-            },
-        )
-    }
-
-    pub fn fold_captured_lifetime_args(
-        self,
-        tcx: TyCtxt<'tcx>,
-        mut f: impl FnMut(Region<'tcx>) -> Region<'tcx>,
-    ) -> Self {
-        let Self { def_id, args } = self;
-        let args = std::iter::zip(args, tcx.variances_of(def_id)).map(|(arg, v)| {
-            match (arg.unpack(), v) {
-                (ty::GenericArgKind::Lifetime(_), ty::Bivariant) => arg,
-                (ty::GenericArgKind::Lifetime(lt), _) => f(lt).into(),
-                _ => arg,
-            }
-        });
-        let args = tcx.mk_args_from_iter(args);
-        Self { def_id, args }
-    }
-}
-
 #[derive(Copy, Clone, Debug, TypeFoldable, TypeVisitable, HashStable, TyEncodable, TyDecodable)]
 pub struct OpaqueHiddenType<'tcx> {
     /// The span of this particular definition of the opaque type. So
@@ -968,10 +860,34 @@ pub struct Placeholder<T> {
     pub universe: UniverseIndex,
     pub bound: T,
 }
+impl Placeholder<BoundVar> {
+    pub fn find_const_ty_from_env<'tcx>(self, env: ParamEnv<'tcx>) -> Ty<'tcx> {
+        let mut candidates = env.caller_bounds().iter().filter_map(|clause| {
+            // `ConstArgHasType` are never desugared to be higher ranked.
+            match clause.kind().skip_binder() {
+                ty::ClauseKind::ConstArgHasType(placeholder_ct, ty) => {
+                    assert!(!(placeholder_ct, ty).has_escaping_bound_vars());
+
+                    match placeholder_ct.kind() {
+                        ty::ConstKind::Placeholder(placeholder_ct) if placeholder_ct == self => {
+                            Some(ty)
+                        }
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        });
+
+        let ty = candidates.next().unwrap();
+        assert!(candidates.next().is_none());
+        ty
+    }
+}
 
 pub type PlaceholderRegion = Placeholder<BoundRegion>;
 
-impl PlaceholderLike for PlaceholderRegion {
+impl rustc_type_ir::inherent::PlaceholderLike for PlaceholderRegion {
     fn universe(self) -> UniverseIndex {
         self.universe
     }
@@ -991,7 +907,7 @@ impl PlaceholderLike for PlaceholderRegion {
 
 pub type PlaceholderType = Placeholder<BoundTy>;
 
-impl PlaceholderLike for PlaceholderType {
+impl rustc_type_ir::inherent::PlaceholderLike for PlaceholderType {
     fn universe(self) -> UniverseIndex {
         self.universe
     }
@@ -1018,7 +934,7 @@ pub struct BoundConst<'tcx> {
 
 pub type PlaceholderConst = Placeholder<BoundVar>;
 
-impl PlaceholderLike for PlaceholderConst {
+impl rustc_type_ir::inherent::PlaceholderLike for PlaceholderConst {
     fn universe(self) -> UniverseIndex {
         self.universe
     }
@@ -1070,12 +986,22 @@ pub struct ParamEnv<'tcx> {
     packed: CopyTaggedPtr<Clauses<'tcx>, ParamTag, true>,
 }
 
+impl<'tcx> rustc_type_ir::inherent::ParamEnv<TyCtxt<'tcx>> for ParamEnv<'tcx> {
+    fn reveal(self) -> Reveal {
+        self.reveal()
+    }
+
+    fn caller_bounds(self) -> impl IntoIterator<Item = ty::Clause<'tcx>> {
+        self.caller_bounds()
+    }
+}
+
 #[derive(Copy, Clone)]
 struct ParamTag {
     reveal: traits::Reveal,
 }
 
-impl_tag! {
+rustc_data_structures::impl_tag! {
     impl Tag for ParamTag;
     ParamTag { reveal: traits::Reveal::UserFacing },
     ParamTag { reveal: traits::Reveal::All },
@@ -1212,18 +1138,24 @@ pub struct Destructor {
     pub constness: hir::Constness,
 }
 
+// FIXME: consider combining this definition with regular `Destructor`
+#[derive(Copy, Clone, Debug, HashStable, Encodable, Decodable)]
+pub struct AsyncDestructor {
+    /// The `DefId` of the async destructor future constructor
+    pub ctor: DefId,
+    /// The `DefId` of the async destructor future type
+    pub future: DefId,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, HashStable, TyEncodable, TyDecodable)]
 pub struct VariantFlags(u8);
-bitflags! {
+bitflags::bitflags! {
     impl VariantFlags: u8 {
         const NO_VARIANT_FLAGS        = 0;
         /// Indicates whether the field list of this variant is `#[non_exhaustive]`.
         const IS_FIELD_LIST_NON_EXHAUSTIVE = 1 << 0;
-        /// Indicates whether this variant was obtained as part of recovering from
-        /// a syntactic error. May be incomplete or bogus.
-        const IS_RECOVERED = 1 << 1;
         /// Indicates whether this variant has unnamed fields.
-        const HAS_UNNAMED_FIELDS = 1 << 2;
+        const HAS_UNNAMED_FIELDS = 1 << 1;
     }
 }
 rustc_data_structures::external_bitflags_debug! { VariantFlags }
@@ -1243,6 +1175,8 @@ pub struct VariantDef {
     pub discr: VariantDiscr,
     /// Fields of this variant.
     pub fields: IndexVec<FieldIdx, FieldDef>,
+    /// The error guarantees from parser, if any.
+    tainted: Option<ErrorGuaranteed>,
     /// Flags of the variant (e.g. is field list non-exhaustive)?
     flags: VariantFlags,
 }
@@ -1272,7 +1206,7 @@ impl VariantDef {
         fields: IndexVec<FieldIdx, FieldDef>,
         adt_kind: AdtKind,
         parent_did: DefId,
-        recovered: bool,
+        recover_tainted: Option<ErrorGuaranteed>,
         is_field_list_non_exhaustive: bool,
         has_unnamed_fields: bool,
     ) -> Self {
@@ -1287,27 +1221,25 @@ impl VariantDef {
             flags |= VariantFlags::IS_FIELD_LIST_NON_EXHAUSTIVE;
         }
 
-        if recovered {
-            flags |= VariantFlags::IS_RECOVERED;
-        }
-
         if has_unnamed_fields {
             flags |= VariantFlags::HAS_UNNAMED_FIELDS;
         }
 
-        VariantDef { def_id: variant_did.unwrap_or(parent_did), ctor, name, discr, fields, flags }
+        VariantDef {
+            def_id: variant_did.unwrap_or(parent_did),
+            ctor,
+            name,
+            discr,
+            fields,
+            flags,
+            tainted: recover_tainted,
+        }
     }
 
     /// Is this field list non-exhaustive?
     #[inline]
     pub fn is_field_list_non_exhaustive(&self) -> bool {
         self.flags.intersects(VariantFlags::IS_FIELD_LIST_NON_EXHAUSTIVE)
-    }
-
-    /// Was this variant obtained as part of recovering from a syntactic error?
-    #[inline]
-    pub fn is_recovered(&self) -> bool {
-        self.flags.intersects(VariantFlags::IS_RECOVERED)
     }
 
     /// Does this variant contains unnamed fields
@@ -1319,6 +1251,12 @@ impl VariantDef {
     /// Computes the `Ident` of this variant by looking up the `Span`
     pub fn ident(&self, tcx: TyCtxt<'_>) -> Ident {
         Ident::new(self.name, tcx.def_ident_span(self.def_id).unwrap())
+    }
+
+    /// Was this variant obtained as part of recovering from a syntactic error?
+    #[inline]
+    pub fn has_errors(&self) -> Result<(), ErrorGuaranteed> {
+        self.tainted.map_or(Ok(()), Err)
     }
 
     #[inline]
@@ -1368,8 +1306,24 @@ impl PartialEq for VariantDef {
         // definition of `VariantDef` changes, a compile-error will be produced,
         // reminding us to revisit this assumption.
 
-        let Self { def_id: lhs_def_id, ctor: _, name: _, discr: _, fields: _, flags: _ } = &self;
-        let Self { def_id: rhs_def_id, ctor: _, name: _, discr: _, fields: _, flags: _ } = other;
+        let Self {
+            def_id: lhs_def_id,
+            ctor: _,
+            name: _,
+            discr: _,
+            fields: _,
+            flags: _,
+            tainted: _,
+        } = &self;
+        let Self {
+            def_id: rhs_def_id,
+            ctor: _,
+            name: _,
+            discr: _,
+            fields: _,
+            flags: _,
+            tainted: _,
+        } = other;
 
         let res = lhs_def_id == rhs_def_id;
 
@@ -1399,7 +1353,7 @@ impl Hash for VariantDef {
         // of `VariantDef` changes, a compile-error will be produced, reminding
         // us to revisit this assumption.
 
-        let Self { def_id, ctor: _, name: _, discr: _, fields: _, flags: _ } = &self;
+        let Self { def_id, ctor: _, name: _, discr: _, fields: _, flags: _, tainted: _ } = &self;
         def_id.hash(s)
     }
 }
@@ -1493,14 +1447,14 @@ pub enum ImplOverlapKind {
         /// Whether or not the impl is permitted due to the trait being a `#[marker]` trait
         marker: bool,
     },
-    /// These impls are allowed to overlap, but that raises
-    /// an issue #33140 future-compatibility warning.
+    /// These impls are allowed to overlap, but that raises an
+    /// issue #33140 future-compatibility warning (tracked in #56484).
     ///
     /// Some background: in Rust 1.0, the trait-object types `Send + Sync` (today's
     /// `dyn Send + Sync`) and `Sync + Send` (now `dyn Sync + Send`) were different.
     ///
-    /// The widely-used version 0.1.0 of the crate `traitobject` had accidentally relied
-    /// that difference, making what reduces to the following set of impls:
+    /// The widely-used version 0.1.0 of the crate `traitobject` had accidentally relied on
+    /// that difference, doing what reduces to the following set of impls:
     ///
     /// ```compile_fail,(E0119)
     /// trait Trait {}
@@ -1525,7 +1479,7 @@ pub enum ImplOverlapKind {
     /// 4. Neither of the impls can have any where-clauses.
     ///
     /// Once `traitobject` 0.1.0 is no longer an active concern, this hack can be removed.
-    Issue33140,
+    FutureCompatOrderDepTraitObjects,
 }
 
 /// Useful source information about where a desugared associated type for an
@@ -1669,7 +1623,7 @@ impl<'tcx> TyCtxt<'tcx> {
         }
     }
 
-    /// If the def-id is an associated type that was desugared from a
+    /// If the `def_id` is an associated type that was desugared from a
     /// return-position `impl Trait` from a trait, then provide the source info
     /// about where that RPITIT came from.
     pub fn opt_rpitit_info(self, def_id: DefId) -> Option<ImplTraitInTraitData> {
@@ -1677,6 +1631,16 @@ impl<'tcx> TyCtxt<'tcx> {
             self.associated_item(def_id).opt_rpitit_info
         } else {
             None
+        }
+    }
+
+    /// Whether the `def_id` is an associated type that was desugared from a
+    /// `#[const_trait]` or `impl_const`.
+    pub fn is_effects_desugared_assoc_ty(self, def_id: DefId) -> bool {
+        if let DefKind::AssocTy = self.def_kind(def_id) {
+            self.associated_item(def_id).is_effects_desugaring
+        } else {
+            false
         }
     }
 
@@ -1720,27 +1684,26 @@ impl<'tcx> TyCtxt<'tcx> {
             | (ImplPolarity::Negative, ImplPolarity::Negative) => {}
         };
 
-        let is_marker_overlap = {
-            let is_marker_impl =
-                |trait_ref: TraitRef<'_>| -> bool { self.trait_def(trait_ref.def_id).is_marker };
-            is_marker_impl(trait_ref1) && is_marker_impl(trait_ref2)
-        };
+        let is_marker_impl = |trait_ref: TraitRef<'_>| self.trait_def(trait_ref.def_id).is_marker;
+        let is_marker_overlap = is_marker_impl(trait_ref1) && is_marker_impl(trait_ref2);
 
         if is_marker_overlap {
-            Some(ImplOverlapKind::Permitted { marker: true })
-        } else {
-            if let Some(self_ty1) = self.issue33140_self_ty(def_id1) {
-                if let Some(self_ty2) = self.issue33140_self_ty(def_id2) {
-                    if self_ty1 == self_ty2 {
-                        return Some(ImplOverlapKind::Issue33140);
-                    } else {
-                        debug!("found {self_ty1:?} != {self_ty2:?}");
-                    }
-                }
-            }
-
-            None
+            return Some(ImplOverlapKind::Permitted { marker: true });
         }
+
+        if let Some(self_ty1) =
+            self.self_ty_of_trait_impl_enabling_order_dep_trait_object_hack(def_id1)
+            && let Some(self_ty2) =
+                self.self_ty_of_trait_impl_enabling_order_dep_trait_object_hack(def_id2)
+        {
+            if self_ty1 == self_ty2 {
+                return Some(ImplOverlapKind::FutureCompatOrderDepTraitObjects);
+            } else {
+                debug!("found {self_ty1:?} != {self_ty2:?}");
+            }
+        }
+
+        None
     }
 
     /// Returns `ty::VariantDef` if `res` refers to a struct,
@@ -1765,11 +1728,11 @@ impl<'tcx> TyCtxt<'tcx> {
         }
     }
 
-    /// Returns the possibly-auto-generated MIR of a [`ty::InstanceDef`].
+    /// Returns the possibly-auto-generated MIR of a [`ty::InstanceKind`].
     #[instrument(skip(self), level = "debug")]
-    pub fn instance_mir(self, instance: ty::InstanceDef<'tcx>) -> &'tcx Body<'tcx> {
+    pub fn instance_mir(self, instance: ty::InstanceKind<'tcx>) -> &'tcx Body<'tcx> {
         match instance {
-            ty::InstanceDef::Item(def) => {
+            ty::InstanceKind::Item(def) => {
                 debug!("calling def_kind on def: {:?}", def);
                 let def_kind = self.def_kind(def);
                 debug!("returned from def_kind: {:?}", def_kind);
@@ -1785,18 +1748,19 @@ impl<'tcx> TyCtxt<'tcx> {
                     _ => self.optimized_mir(def),
                 }
             }
-            ty::InstanceDef::VTableShim(..)
-            | ty::InstanceDef::ReifyShim(..)
-            | ty::InstanceDef::Intrinsic(..)
-            | ty::InstanceDef::FnPtrShim(..)
-            | ty::InstanceDef::Virtual(..)
-            | ty::InstanceDef::ClosureOnceShim { .. }
-            | ty::InstanceDef::ConstructCoroutineInClosureShim { .. }
-            | ty::InstanceDef::CoroutineKindShim { .. }
-            | ty::InstanceDef::DropGlue(..)
-            | ty::InstanceDef::CloneShim(..)
-            | ty::InstanceDef::ThreadLocalShim(..)
-            | ty::InstanceDef::FnPtrAddrShim(..) => self.mir_shims(instance),
+            ty::InstanceKind::VTableShim(..)
+            | ty::InstanceKind::ReifyShim(..)
+            | ty::InstanceKind::Intrinsic(..)
+            | ty::InstanceKind::FnPtrShim(..)
+            | ty::InstanceKind::Virtual(..)
+            | ty::InstanceKind::ClosureOnceShim { .. }
+            | ty::InstanceKind::ConstructCoroutineInClosureShim { .. }
+            | ty::InstanceKind::CoroutineKindShim { .. }
+            | ty::InstanceKind::DropGlue(..)
+            | ty::InstanceKind::CloneShim(..)
+            | ty::InstanceKind::ThreadLocalShim(..)
+            | ty::InstanceKind::FnPtrAddrShim(..)
+            | ty::InstanceKind::AsyncDropGlueCtorShim(..) => self.mir_shims(instance),
         }
     }
 
@@ -1853,6 +1817,11 @@ impl<'tcx> TyCtxt<'tcx> {
     /// Determines whether an item is annotated with an attribute.
     pub fn has_attr(self, did: impl Into<DefId>, attr: Symbol) -> bool {
         self.get_attrs(did, attr).next().is_some()
+    }
+
+    /// Determines whether an item is annotated with a multi-segement attribute
+    pub fn has_attrs_with_path(self, did: impl Into<DefId>, attrs: &[Symbol]) -> bool {
+        self.get_attrs_by_path(did.into(), attrs).next().is_some()
     }
 
     /// Returns `true` if this is an `auto trait`.
@@ -2004,22 +1973,6 @@ impl<'tcx> TyCtxt<'tcx> {
         (ident, scope)
     }
 
-    /// Returns corrected span if the debuginfo for `span` should be collapsed to the outermost
-    /// expansion site (with collapse_debuginfo attribute if the corresponding feature enabled).
-    /// Only applies when `Span` is the result of macro expansion.
-    ///
-    /// - If the `collapse_debuginfo` feature is enabled then debuginfo is not collapsed by default
-    ///   and only when a (some enclosing) macro definition is annotated with `#[collapse_debuginfo]`.
-    /// - If `collapse_debuginfo` is not enabled, then debuginfo is collapsed by default.
-    ///
-    /// When `-Zdebug-macros` is provided then debuginfo will never be collapsed.
-    pub fn collapsed_debuginfo(self, span: Span, upto: Span) -> Span {
-        if self.sess.opts.unstable_opts.debug_macros || !span.from_expansion() {
-            return span;
-        }
-        hygiene::walk_chain_collapsed(span, upto, self.features().collapse_debuginfo)
-    }
-
     #[inline]
     pub fn is_const_fn_raw(self, def_id: DefId) -> bool {
         matches!(
@@ -2029,8 +1982,13 @@ impl<'tcx> TyCtxt<'tcx> {
     }
 
     #[inline]
+    pub fn is_const_trait(self, def_id: DefId) -> bool {
+        self.trait_def(def_id).constness == hir::Constness::Const
+    }
+
+    #[inline]
     pub fn is_const_default_method(self, def_id: DefId) -> bool {
-        matches!(self.trait_of_item(def_id), Some(trait_id) if self.has_attr(trait_id, sym::const_trait))
+        matches!(self.trait_of_item(def_id), Some(trait_id) if self.is_const_trait(trait_id))
     }
 
     pub fn impl_method_has_trait_impl_trait_tys(self, def_id: DefId) -> bool {
@@ -2120,6 +2078,8 @@ pub fn provide(providers: &mut Providers) {
     *providers = Providers {
         trait_impls_of: trait_def::trait_impls_of_provider,
         incoherent_impls: trait_def::incoherent_impls_provider,
+        trait_impls_in_crate: trait_def::trait_impls_in_crate_provider,
+        traits: trait_def::traits_provider,
         const_param_default: consts::const_param_default,
         vtable_allocation: vtable::vtable_allocation_provider,
         ..*providers
@@ -2133,8 +2093,8 @@ pub fn provide(providers: &mut Providers) {
 /// (constructing this map requires touching the entire crate).
 #[derive(Clone, Debug, Default, HashStable)]
 pub struct CrateInherentImpls {
-    pub inherent_impls: LocalDefIdMap<Vec<DefId>>,
-    pub incoherent_impls: UnordMap<SimplifiedType, Vec<LocalDefId>>,
+    pub inherent_impls: FxIndexMap<LocalDefId, Vec<DefId>>,
+    pub incoherent_impls: FxIndexMap<SimplifiedType, Vec<LocalDefId>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, TyEncodable, HashStable)]
@@ -2182,10 +2142,11 @@ pub struct DestructuredConst<'tcx> {
 }
 
 // Some types are used a lot. Make sure they don't unintentionally get bigger.
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 mod size_asserts {
-    use super::*;
     use rustc_data_structures::static_assert_size;
+
+    use super::*;
     // tidy-alphabetical-start
     static_assert_size!(PredicateKind<'_>, 32);
     static_assert_size!(WithCachedTypeInfo<TyKind<'_>>, 56);

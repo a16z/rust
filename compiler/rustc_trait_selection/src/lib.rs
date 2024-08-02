@@ -10,36 +10,33 @@
 //!
 //! This API is completely unstable and subject to change.
 
-#![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
-#![doc(rust_logo)]
-#![feature(rustdoc_internals)]
+// tidy-alphabetical-start
 #![allow(internal_features)]
 #![allow(rustc::diagnostic_outside_of_impl)]
 #![allow(rustc::untranslatable_diagnostic)]
+#![doc(html_root_url = "https://doc.rust-lang.org/nightly/nightly-rustc/")]
+#![doc(rust_logo)]
 #![feature(assert_matches)]
-#![cfg_attr(bootstrap, feature(associated_type_bounds))]
 #![feature(associated_type_defaults)]
 #![feature(box_patterns)]
 #![feature(control_flow_enum)]
 #![feature(extract_if)]
+#![feature(if_let_guard)]
+#![feature(iter_intersperse)]
 #![feature(let_chains)]
-#![feature(option_take_if)]
 #![feature(never_type)]
+#![feature(rustdoc_internals)]
+#![feature(try_blocks)]
 #![feature(type_alias_impl_trait)]
+#![feature(unwrap_infallible)]
+#![feature(yeet_expr)]
 #![recursion_limit = "512"] // For rustdoc
+// tidy-alphabetical-end
 
-#[macro_use]
-extern crate rustc_macros;
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
-#[macro_use]
-extern crate rustc_data_structures;
 #[macro_use]
 extern crate tracing;
-#[macro_use]
-extern crate rustc_middle;
-#[macro_use]
-extern crate smallvec;
 
+pub mod error_reporting;
 pub mod errors;
 pub mod infer;
 pub mod regions;

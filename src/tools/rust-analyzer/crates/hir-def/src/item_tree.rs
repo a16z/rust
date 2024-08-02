@@ -29,6 +29,7 @@
 //!
 //! In general, any item in the `ItemTree` stores its `AstId`, which allows mapping it back to its
 //! surface syntax.
+#![allow(unexpected_cfgs)]
 
 mod lower;
 mod pretty;
@@ -45,8 +46,9 @@ use ast::{AstNode, StructKind};
 use base_db::CrateId;
 use either::Either;
 use hir_expand::{attrs::RawAttrs, name::Name, ExpandTo, HirFileId, InFile};
-use intern::Interned;
-use la_arena::{Arena, Idx, IdxRange, RawIdx};
+use intern::{Interned, Symbol};
+use la_arena::{Arena, Idx, RawIdx};
+use once_cell::sync::OnceCell;
 use rustc_hash::FxHashMap;
 use smallvec::SmallVec;
 use span::{AstIdNode, FileAstId, SyntaxContextId};
@@ -57,21 +59,21 @@ use triomphe::Arc;
 use crate::{
     attr::Attrs,
     db::DefDatabase,
-    generics::{GenericParams, LifetimeParamData, TypeOrConstParamData},
+    generics::GenericParams,
     path::{GenericArgs, ImportAlias, ModPath, Path, PathKind},
     type_ref::{Mutability, TraitRef, TypeBound, TypeRef},
     visibility::{RawVisibility, VisibilityExplicitness},
-    BlockId, Lookup,
+    BlockId, LocalLifetimeParamId, LocalTypeOrConstParamId, Lookup,
 };
 
 #[derive(Copy, Clone, Eq, PartialEq)]
 pub struct RawVisibilityId(u32);
 
 impl RawVisibilityId {
-    pub const PUB: Self = RawVisibilityId(u32::max_value());
-    pub const PRIV_IMPLICIT: Self = RawVisibilityId(u32::max_value() - 1);
-    pub const PRIV_EXPLICIT: Self = RawVisibilityId(u32::max_value() - 2);
-    pub const PUB_CRATE: Self = RawVisibilityId(u32::max_value() - 3);
+    pub const PUB: Self = RawVisibilityId(u32::MAX);
+    pub const PRIV_IMPLICIT: Self = RawVisibilityId(u32::MAX - 1);
+    pub const PRIV_EXPLICIT: Self = RawVisibilityId(u32::MAX - 2);
+    pub const PUB_CRATE: Self = RawVisibilityId(u32::MAX - 3);
 }
 
 impl fmt::Debug for RawVisibilityId {
@@ -98,7 +100,8 @@ pub struct ItemTree {
 
 impl ItemTree {
     pub(crate) fn file_item_tree_query(db: &dyn DefDatabase, file_id: HirFileId) -> Arc<ItemTree> {
-        let _p = tracing::span!(tracing::Level::INFO, "file_item_tree_query", ?file_id).entered();
+        let _p = tracing::info_span!("file_item_tree_query", ?file_id).entered();
+        static EMPTY: OnceCell<Arc<ItemTree>> = OnceCell::new();
 
         let syntax = db.parse_or_expand(file_id);
 
@@ -130,18 +133,47 @@ impl ItemTree {
         if let Some(attrs) = top_attrs {
             item_tree.attrs.insert(AttrOwner::TopLevel, attrs);
         }
-        item_tree.shrink_to_fit();
-        Arc::new(item_tree)
+        if item_tree.data.is_none() && item_tree.top_level.is_empty() && item_tree.attrs.is_empty()
+        {
+            EMPTY
+                .get_or_init(|| {
+                    Arc::new(ItemTree {
+                        top_level: SmallVec::new_const(),
+                        attrs: FxHashMap::default(),
+                        data: None,
+                    })
+                })
+                .clone()
+        } else {
+            item_tree.shrink_to_fit();
+            Arc::new(item_tree)
+        }
     }
 
     pub(crate) fn block_item_tree_query(db: &dyn DefDatabase, block: BlockId) -> Arc<ItemTree> {
+        let _p = tracing::info_span!("block_item_tree_query", ?block).entered();
+        static EMPTY: OnceCell<Arc<ItemTree>> = OnceCell::new();
+
         let loc = block.lookup(db);
         let block = loc.ast_id.to_node(db.upcast());
 
         let ctx = lower::Ctx::new(db, loc.ast_id.file_id);
         let mut item_tree = ctx.lower_block(&block);
-        item_tree.shrink_to_fit();
-        Arc::new(item_tree)
+        if item_tree.data.is_none() && item_tree.top_level.is_empty() && item_tree.attrs.is_empty()
+        {
+            EMPTY
+                .get_or_init(|| {
+                    Arc::new(ItemTree {
+                        top_level: SmallVec::new_const(),
+                        attrs: FxHashMap::default(),
+                        data: None,
+                    })
+                })
+                .clone()
+        } else {
+            item_tree.shrink_to_fit();
+            Arc::new(item_tree)
+        }
     }
 
     /// Returns an iterator over all items located at the top level of the `HirFileId` this
@@ -186,9 +218,7 @@ impl ItemTree {
                 extern_crates,
                 extern_blocks,
                 functions,
-                params,
                 structs,
-                fields,
                 unions,
                 enums,
                 variants,
@@ -209,9 +239,7 @@ impl ItemTree {
             extern_crates.shrink_to_fit();
             extern_blocks.shrink_to_fit();
             functions.shrink_to_fit();
-            params.shrink_to_fit();
             structs.shrink_to_fit();
-            fields.shrink_to_fit();
             unions.shrink_to_fit();
             enums.shrink_to_fit();
             variants.shrink_to_fit();
@@ -241,11 +269,11 @@ impl ItemVisibilities {
         match &vis {
             RawVisibility::Public => RawVisibilityId::PUB,
             RawVisibility::Module(path, explicitiy) if path.segments().is_empty() => {
-                match (&path.kind, explicitiy) {
-                    (PathKind::Super(0), VisibilityExplicitness::Explicit) => {
+                match (path.kind, explicitiy) {
+                    (PathKind::SELF, VisibilityExplicitness::Explicit) => {
                         RawVisibilityId::PRIV_EXPLICIT
                     }
-                    (PathKind::Super(0), VisibilityExplicitness::Implicit) => {
+                    (PathKind::SELF, VisibilityExplicitness::Implicit) => {
                         RawVisibilityId::PRIV_IMPLICIT
                     }
                     (PathKind::Crate, _) => RawVisibilityId::PUB_CRATE,
@@ -263,9 +291,7 @@ struct ItemTreeData {
     extern_crates: Arena<ExternCrate>,
     extern_blocks: Arena<ExternBlock>,
     functions: Arena<Function>,
-    params: Arena<Param>,
     structs: Arena<Struct>,
-    fields: Arena<Field>,
     unions: Arena<Union>,
     enums: Arena<Enum>,
     variants: Arena<Variant>,
@@ -283,7 +309,7 @@ struct ItemTreeData {
     vis: ItemVisibilities,
 }
 
-#[derive(Debug, Eq, PartialEq, Hash)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum AttrOwner {
     /// Attributes on an item.
     ModItem(ModItem),
@@ -291,11 +317,27 @@ pub enum AttrOwner {
     TopLevel,
 
     Variant(FileItemTreeId<Variant>),
-    Field(Idx<Field>),
-    Param(Idx<Param>),
-    TypeOrConstParamData(Idx<TypeOrConstParamData>),
-    LifetimeParamData(Idx<LifetimeParamData>),
+    Field(FieldParent, ItemTreeFieldId),
+    Param(FileItemTreeId<Function>, ItemTreeParamId),
+    TypeOrConstParamData(GenericModItem, LocalTypeOrConstParamId),
+    LifetimeParamData(GenericModItem, LocalLifetimeParamId),
 }
+
+impl AttrOwner {
+    pub fn make_field_indexed(parent: FieldParent, idx: usize) -> Self {
+        AttrOwner::Field(parent, ItemTreeFieldId::from_raw(RawIdx::from_u32(idx as u32)))
+    }
+}
+
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub enum FieldParent {
+    Struct(FileItemTreeId<Struct>),
+    Union(FileItemTreeId<Union>),
+    Variant(FileItemTreeId<Variant>),
+}
+
+pub type ItemTreeParamId = Idx<Param>;
+pub type ItemTreeFieldId = Idx<Field>;
 
 macro_rules! from_attrs {
     ( $( $var:ident($t:ty) ),+ $(,)? ) => {
@@ -309,14 +351,7 @@ macro_rules! from_attrs {
     };
 }
 
-from_attrs!(
-    ModItem(ModItem),
-    Variant(FileItemTreeId<Variant>),
-    Field(Idx<Field>),
-    Param(Idx<Param>),
-    TypeOrConstParamData(Idx<TypeOrConstParamData>),
-    LifetimeParamData(Idx<LifetimeParamData>),
-);
+from_attrs!(ModItem(ModItem), Variant(FileItemTreeId<Variant>));
 
 /// Trait implemented by all nodes in the item tree.
 pub trait ItemTreeNode: Clone {
@@ -335,7 +370,7 @@ pub trait GenericsItemTreeNode: ItemTreeNode {
 pub struct FileItemTreeId<N>(Idx<N>);
 
 impl<N> FileItemTreeId<N> {
-    pub fn range_iter(range: Range<Self>) -> impl Iterator<Item = Self> {
+    pub fn range_iter(range: Range<Self>) -> impl Iterator<Item = Self> + Clone {
         (range.start.index().into_raw().into_u32()..range.end.index().into_raw().into_u32())
             .map(RawIdx::from_u32)
             .map(Idx::from_raw)
@@ -387,18 +422,18 @@ impl TreeId {
         Self { file, block }
     }
 
-    pub(crate) fn item_tree(&self, db: &dyn DefDatabase) -> Arc<ItemTree> {
+    pub fn item_tree(&self, db: &dyn DefDatabase) -> Arc<ItemTree> {
         match self.block {
             Some(block) => db.block_item_tree(block),
             None => db.file_item_tree(self.file),
         }
     }
 
-    pub(crate) fn file_id(self) -> HirFileId {
+    pub fn file_id(self) -> HirFileId {
         self.file
     }
 
-    pub(crate) fn is_block(self) -> bool {
+    pub fn is_block(self) -> bool {
         self.block.is_some()
     }
 }
@@ -465,12 +500,70 @@ macro_rules! mod_items {
             )+
         }
 
+        #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+        pub enum GenericModItem {
+            $(
+                $(
+                    #[cfg_attr(ignore_fragment, $generic_params)]
+                    $typ(FileItemTreeId<$typ>),
+                )?
+            )+
+        }
+
+        impl ModItem {
+            pub fn ast_id(&self, tree: &ItemTree) -> FileAstId<ast::Item> {
+                match self {
+                    $(ModItem::$typ(it) => tree[it.index()].ast_id().upcast()),+
+                }
+            }
+        }
+
+        impl GenericModItem {
+            pub fn ast_id(&self, tree: &ItemTree) -> FileAstId<ast::AnyHasGenericParams> {
+                match self {
+                    $(
+                        $(
+                            #[cfg_attr(ignore_fragment, $generic_params)]
+                            GenericModItem::$typ(it) => tree[it.index()].ast_id().upcast(),
+                        )?
+                    )+
+                }
+            }
+        }
+
+        impl From<GenericModItem> for ModItem {
+            fn from(id: GenericModItem) -> ModItem {
+                match id {
+                    $(
+                        $(
+                            #[cfg_attr(ignore_fragment, $generic_params)]
+                            GenericModItem::$typ(id) => ModItem::$typ(id),
+                        )?
+                    )+
+                }
+            }
+        }
+
+        impl From<GenericModItem> for AttrOwner {
+            fn from(t: GenericModItem) -> AttrOwner {
+                AttrOwner::ModItem(t.into())
+            }
+        }
+
         $(
             impl From<FileItemTreeId<$typ>> for ModItem {
                 fn from(id: FileItemTreeId<$typ>) -> ModItem {
                     ModItem::$typ(id)
                 }
             }
+            $(
+                #[cfg_attr(ignore_fragment, $generic_params)]
+                impl From<FileItemTreeId<$typ>> for GenericModItem {
+                    fn from(id: FileItemTreeId<$typ>) -> GenericModItem {
+                        GenericModItem::$typ(id)
+                    }
+                }
+            )?
         )+
 
         $(
@@ -529,44 +622,34 @@ mod_items! {
     Macro2 in macro_defs -> ast::MacroDef,
 }
 
-macro_rules! impl_index {
-    ( $($fld:ident: $t:ty),+ $(,)? ) => {
-        $(
-            impl Index<Idx<$t>> for ItemTree {
-                type Output = $t;
-
-                fn index(&self, index: Idx<$t>) -> &Self::Output {
-                    &self.data().$fld[index]
-                }
-            }
-        )+
-    };
-}
-
-impl_index!(fields: Field, variants: Variant, params: Param);
-
 impl Index<RawVisibilityId> for ItemTree {
     type Output = RawVisibility;
     fn index(&self, index: RawVisibilityId) -> &Self::Output {
         static VIS_PUB: RawVisibility = RawVisibility::Public;
-        static VIS_PRIV_IMPLICIT: RawVisibility = RawVisibility::Module(
-            ModPath::from_kind(PathKind::Super(0)),
-            VisibilityExplicitness::Implicit,
-        );
-        static VIS_PRIV_EXPLICIT: RawVisibility = RawVisibility::Module(
-            ModPath::from_kind(PathKind::Super(0)),
-            VisibilityExplicitness::Explicit,
-        );
-        static VIS_PUB_CRATE: RawVisibility = RawVisibility::Module(
-            ModPath::from_kind(PathKind::Crate),
-            VisibilityExplicitness::Explicit,
-        );
+        static VIS_PRIV_IMPLICIT: OnceCell<RawVisibility> = OnceCell::new();
+        static VIS_PRIV_EXPLICIT: OnceCell<RawVisibility> = OnceCell::new();
+        static VIS_PUB_CRATE: OnceCell<RawVisibility> = OnceCell::new();
 
         match index {
-            RawVisibilityId::PRIV_IMPLICIT => &VIS_PRIV_IMPLICIT,
-            RawVisibilityId::PRIV_EXPLICIT => &VIS_PRIV_EXPLICIT,
+            RawVisibilityId::PRIV_IMPLICIT => VIS_PRIV_IMPLICIT.get_or_init(|| {
+                RawVisibility::Module(
+                    Interned::new(ModPath::from_kind(PathKind::SELF)),
+                    VisibilityExplicitness::Implicit,
+                )
+            }),
+            RawVisibilityId::PRIV_EXPLICIT => VIS_PRIV_EXPLICIT.get_or_init(|| {
+                RawVisibility::Module(
+                    Interned::new(ModPath::from_kind(PathKind::SELF)),
+                    VisibilityExplicitness::Explicit,
+                )
+            }),
             RawVisibilityId::PUB => &VIS_PUB,
-            RawVisibilityId::PUB_CRATE => &VIS_PUB_CRATE,
+            RawVisibilityId::PUB_CRATE => VIS_PUB_CRATE.get_or_init(|| {
+                RawVisibility::Module(
+                    Interned::new(ModPath::from_kind(PathKind::Crate)),
+                    VisibilityExplicitness::Explicit,
+                )
+            }),
             _ => &self.data().vis.arena[Idx::from_raw(index.0.into())],
         }
     }
@@ -639,7 +722,7 @@ pub struct ExternCrate {
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct ExternBlock {
-    pub abi: Option<Interned<str>>,
+    pub abi: Option<Symbol>,
     pub ast_id: FileAstId<ast::ExternBlock>,
     pub children: Box<[ModItem]>,
 }
@@ -649,8 +732,8 @@ pub struct Function {
     pub name: Name,
     pub visibility: RawVisibilityId,
     pub explicit_generic_params: Interned<GenericParams>,
-    pub abi: Option<Interned<str>>,
-    pub params: IdxRange<Param>,
+    pub abi: Option<Symbol>,
+    pub params: Box<[Param]>,
     pub ret_type: Interned<TypeRef>,
     pub ast_id: FileAstId<ast::Fn>,
     pub(crate) flags: FnFlags,
@@ -658,15 +741,7 @@ pub struct Function {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
-    /// This is [`None`] for varargs
     pub type_ref: Option<Interned<TypeRef>>,
-    pub ast_id: ParamAstId,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ParamAstId {
-    Param(FileAstId<ast::Param>),
-    SelfParam(FileAstId<ast::SelfParam>),
 }
 
 bitflags::bitflags! {
@@ -687,7 +762,8 @@ pub struct Struct {
     pub name: Name,
     pub visibility: RawVisibilityId,
     pub generic_params: Interned<GenericParams>,
-    pub fields: Fields,
+    pub fields: Box<[Field]>,
+    pub shape: FieldsShape,
     pub ast_id: FileAstId<ast::Struct>,
 }
 
@@ -696,7 +772,7 @@ pub struct Union {
     pub name: Name,
     pub visibility: RawVisibilityId,
     pub generic_params: Interned<GenericParams>,
-    pub fields: Fields,
+    pub fields: Box<[Field]>,
     pub ast_id: FileAstId<ast::Union>,
 }
 
@@ -709,6 +785,29 @@ pub struct Enum {
     pub ast_id: FileAstId<ast::Enum>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Variant {
+    pub name: Name,
+    pub fields: Box<[Field]>,
+    pub shape: FieldsShape,
+    pub ast_id: FileAstId<ast::Variant>,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub enum FieldsShape {
+    Record,
+    Tuple,
+    Unit,
+}
+
+/// A single field of an enum variant or struct
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Field {
+    pub name: Name,
+    pub type_ref: Interned<TypeRef>,
+    pub visibility: RawVisibilityId,
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Const {
     /// `None` for `const _: () = ();`
@@ -716,6 +815,7 @@ pub struct Const {
     pub visibility: RawVisibilityId,
     pub type_ref: Interned<TypeRef>,
     pub ast_id: FileAstId<ast::Const>,
+    pub has_body: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -891,7 +991,7 @@ impl UseTree {
                         _ => None,
                     }
                 }
-                (Some(prefix), PathKind::Super(0)) if path.segments().is_empty() => {
+                (Some(prefix), PathKind::SELF) if path.segments().is_empty() => {
                     // `some::path::self` == `some::path`
                     Some((prefix, ImportKind::TypeOnly))
                 }
@@ -965,28 +1065,6 @@ impl ModItem {
             &ModItem::Function(func) => Some(AssocItem::Function(func)),
         }
     }
-
-    pub fn ast_id(&self, tree: &ItemTree) -> FileAstId<ast::Item> {
-        match self {
-            ModItem::Use(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::ExternCrate(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::ExternBlock(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::Function(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::Struct(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::Union(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::Enum(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::Const(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::Static(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::Trait(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::TraitAlias(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::Impl(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::TypeAlias(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::Mod(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::MacroCall(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::MacroRules(it) => tree[it.index()].ast_id().upcast(),
-            ModItem::Macro2(it) => tree[it.index()].ast_id().upcast(),
-        }
-    }
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -1024,33 +1102,4 @@ impl AssocItem {
             AssocItem::MacroCall(id) => tree[id].ast_id.upcast(),
         }
     }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Variant {
-    pub name: Name,
-    pub fields: Fields,
-    pub ast_id: FileAstId<ast::Variant>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Fields {
-    Record(IdxRange<Field>),
-    Tuple(IdxRange<Field>),
-    Unit,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FieldAstId {
-    Record(FileAstId<ast::RecordField>),
-    Tuple(FileAstId<ast::TupleField>),
-}
-
-/// A single field of an enum variant or struct
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Field {
-    pub name: Name,
-    pub type_ref: Interned<TypeRef>,
-    pub visibility: RawVisibilityId,
-    pub ast_id: FieldAstId,
 }

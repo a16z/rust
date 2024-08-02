@@ -1,19 +1,19 @@
 //@ only-wasm32-wasip1
-extern crate run_make_support;
 
-use run_make_support::{tmp_dir, wasmparser, rustc};
 use std::collections::HashMap;
 use std::path::Path;
+
+use run_make_support::{rfs, rustc, wasmparser};
 
 fn main() {
     rustc().input("foo.rs").target("wasm32-wasip1").opt().run();
 
-    verify(&tmp_dir().join("foo.wasm"));
+    verify(Path::new("foo.wasm"));
 }
 
 fn verify(path: &Path) {
     eprintln!("verify {path:?}");
-    let file = std::fs::read(&path).unwrap();
+    let file = rfs::read(&path);
 
     let mut custom = HashMap::new();
     for payload in wasmparser::Parser::new(0).parse_all(&file) {

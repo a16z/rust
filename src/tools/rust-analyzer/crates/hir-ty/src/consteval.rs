@@ -15,10 +15,9 @@ use stdx::never;
 use triomphe::Arc;
 
 use crate::{
-    db::HirDatabase, infer::InferenceContext, lower::ParamLoweringMode,
-    mir::monomorphize_mir_body_bad, to_placeholder_idx, utils::Generics, Const, ConstData,
-    ConstScalar, ConstValue, GenericArg, Interner, MemoryMap, Substitution, TraitEnvironment, Ty,
-    TyBuilder,
+    db::HirDatabase, generics::Generics, infer::InferenceContext, lower::ParamLoweringMode,
+    mir::monomorphize_mir_body_bad, to_placeholder_idx, Const, ConstData, ConstScalar, ConstValue,
+    GenericArg, Interner, MemoryMap, Substitution, TraitEnvironment, Ty, TyBuilder,
 };
 
 use super::mir::{interpret_mir, lower_to_mir, pad16, MirEvalError, MirLowerError};
@@ -72,35 +71,37 @@ impl From<MirEvalError> for ConstEvalError {
     }
 }
 
-pub(crate) fn path_to_const(
+pub(crate) fn path_to_const<'g>(
     db: &dyn HirDatabase,
     resolver: &Resolver,
     path: &Path,
     mode: ParamLoweringMode,
-    args_lazy: impl FnOnce() -> Generics,
+    args: impl FnOnce() -> Option<&'g Generics>,
     debruijn: DebruijnIndex,
     expected_ty: Ty,
 ) -> Option<Const> {
     match resolver.resolve_path_in_value_ns_fully(db.upcast(), path) {
         Some(ValueNs::GenericParam(p)) => {
             let ty = db.const_param_ty(p);
-            let args = args_lazy();
             let value = match mode {
                 ParamLoweringMode::Placeholder => {
                     ConstValue::Placeholder(to_placeholder_idx(db, p.into()))
                 }
-                ParamLoweringMode::Variable => match args.param_idx(p.into()) {
-                    Some(it) => ConstValue::BoundVar(BoundVar::new(debruijn, it)),
-                    None => {
-                        never!(
-                            "Generic list doesn't contain this param: {:?}, {:?}, {:?}",
-                            args,
-                            path,
-                            p
-                        );
-                        return None;
+                ParamLoweringMode::Variable => {
+                    let args = args();
+                    match args.and_then(|args| args.type_or_const_param_idx(p.into())) {
+                        Some(it) => ConstValue::BoundVar(BoundVar::new(debruijn, it)),
+                        None => {
+                            never!(
+                                "Generic list doesn't contain this param: {:?}, {:?}, {:?}",
+                                args,
+                                path,
+                                p
+                            );
+                            return None;
+                        }
                     }
-                },
+                }
             };
             Some(ConstData { ty, value }.intern(Interner))
         }
@@ -285,7 +286,6 @@ pub(crate) fn eval_to_const(
     expr: ExprId,
     mode: ParamLoweringMode,
     ctx: &mut InferenceContext<'_>,
-    args: impl FnOnce() -> Generics,
     debruijn: DebruijnIndex,
 ) -> Const {
     let db = ctx.db;
@@ -304,7 +304,9 @@ pub(crate) fn eval_to_const(
     }
     if let Expr::Path(p) = &ctx.body.exprs[expr] {
         let resolver = &ctx.resolver;
-        if let Some(c) = path_to_const(db, resolver, p, mode, args, debruijn, infer[expr].clone()) {
+        if let Some(c) =
+            path_to_const(db, resolver, p, mode, || ctx.generics(), debruijn, infer[expr].clone())
+        {
             return c;
         }
     }

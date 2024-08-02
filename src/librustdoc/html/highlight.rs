@@ -5,10 +5,6 @@
 //!
 //! Use the `render_with_highlighting` to highlight some rust code.
 
-use crate::clean::PrimitiveType;
-use crate::html::escape::EscapeBodyText;
-use crate::html::render::{Context, LinkFromSrc};
-
 use std::collections::VecDeque;
 use std::fmt::{Display, Write};
 
@@ -19,6 +15,9 @@ use rustc_span::symbol::Symbol;
 use rustc_span::{BytePos, Span, DUMMY_SP};
 
 use super::format::{self, Buffer};
+use crate::clean::PrimitiveType;
+use crate::html::escape::EscapeBodyText;
+use crate::html::render::{Context, LinkFromSrc};
 
 /// This type is needed in case we want to render links on items to allow to go to their definition.
 pub(crate) struct HrefContext<'a, 'tcx> {
@@ -876,9 +875,10 @@ impl<'src> Classifier<'src> {
                 },
                 Some(c) => c,
             },
-            TokenKind::RawIdent | TokenKind::UnknownPrefix | TokenKind::InvalidIdent => {
-                Class::Ident(self.new_span(before, text))
-            }
+            TokenKind::RawIdent
+            | TokenKind::UnknownPrefix
+            | TokenKind::InvalidPrefix
+            | TokenKind::InvalidIdent => Class::Ident(self.new_span(before, text)),
             TokenKind::Lifetime { .. } => Class::Lifetime,
             TokenKind::Eof => panic!("Eof in advance"),
         };

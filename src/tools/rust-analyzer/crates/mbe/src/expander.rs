@@ -5,61 +5,59 @@
 mod matcher;
 mod transcriber;
 
+use intern::Symbol;
 use rustc_hash::FxHashMap;
-use span::Span;
-use syntax::SmolStr;
+use span::{Edition, Span};
 
-use crate::{parser::MetaVarKind, ExpandError, ExpandResult};
+use crate::{parser::MetaVarKind, ExpandError, ExpandErrorKind, ExpandResult, MatchedArmIndex};
 
 pub(crate) fn expand_rules(
     rules: &[crate::Rule],
     input: &tt::Subtree<Span>,
     marker: impl Fn(&mut Span) + Copy,
-    new_meta_vars: bool,
     call_site: Span,
-) -> ExpandResult<tt::Subtree<Span>> {
-    let mut match_: Option<(matcher::Match, &crate::Rule)> = None;
-    for rule in rules {
-        let new_match = matcher::match_(&rule.lhs, input);
+    def_site_edition: Edition,
+) -> ExpandResult<(tt::Subtree<Span>, MatchedArmIndex)> {
+    let mut match_: Option<(matcher::Match, &crate::Rule, usize)> = None;
+    for (idx, rule) in rules.iter().enumerate() {
+        let new_match = matcher::match_(&rule.lhs, input, def_site_edition);
 
         if new_match.err.is_none() {
             // If we find a rule that applies without errors, we're done.
             // Unconditionally returning the transcription here makes the
             // `test_repeat_bad_var` test fail.
-            let ExpandResult { value, err: transcribe_err } = transcriber::transcribe(
-                &rule.rhs,
-                &new_match.bindings,
-                marker,
-                new_meta_vars,
-                call_site,
-            );
+            let ExpandResult { value, err: transcribe_err } =
+                transcriber::transcribe(&rule.rhs, &new_match.bindings, marker, call_site);
             if transcribe_err.is_none() {
-                return ExpandResult::ok(value);
+                return ExpandResult::ok((value, Some(idx as u32)));
             }
         }
         // Use the rule if we matched more tokens, or bound variables count
-        if let Some((prev_match, _)) = &match_ {
+        if let Some((prev_match, _, _)) = &match_ {
             if (new_match.unmatched_tts, -(new_match.bound_count as i32))
                 < (prev_match.unmatched_tts, -(prev_match.bound_count as i32))
             {
-                match_ = Some((new_match, rule));
+                match_ = Some((new_match, rule, idx));
             }
         } else {
-            match_ = Some((new_match, rule));
+            match_ = Some((new_match, rule, idx));
         }
     }
-    if let Some((match_, rule)) = match_ {
+    if let Some((match_, rule, idx)) = match_ {
         // if we got here, there was no match without errors
         let ExpandResult { value, err: transcribe_err } =
-            transcriber::transcribe(&rule.rhs, &match_.bindings, marker, new_meta_vars, call_site);
-        ExpandResult { value, err: match_.err.or(transcribe_err) }
+            transcriber::transcribe(&rule.rhs, &match_.bindings, marker, call_site);
+        ExpandResult { value: (value, idx.try_into().ok()), err: match_.err.or(transcribe_err) }
     } else {
         ExpandResult::new(
-            tt::Subtree {
-                delimiter: tt::Delimiter::invisible_spanned(call_site),
-                token_trees: Box::new([]),
-            },
-            ExpandError::NoMatchingRule,
+            (
+                tt::Subtree {
+                    delimiter: tt::Delimiter::invisible_spanned(call_site),
+                    token_trees: Box::default(),
+                },
+                None,
+            ),
+            ExpandError::new(call_site, ExpandErrorKind::NoMatchingRule),
         )
     }
 }
@@ -106,12 +104,12 @@ pub(crate) fn expand_rules(
 /// the `Bindings` we should take. We push to the stack when we enter a
 /// repetition.
 ///
-/// In other words, `Bindings` is a *multi* mapping from `SmolStr` to
+/// In other words, `Bindings` is a *multi* mapping from `Symbol` to
 /// `tt::TokenTree`, where the index to select a particular `TokenTree` among
 /// many is not a plain `usize`, but a `&[usize]`.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 struct Bindings {
-    inner: FxHashMap<SmolStr, Binding>,
+    inner: FxHashMap<Symbol, Binding>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

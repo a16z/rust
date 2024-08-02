@@ -245,17 +245,15 @@ use self::Ordering::*;
     append_const_msg
 )]
 #[rustc_diagnostic_item = "PartialEq"]
-#[const_trait]
 pub trait PartialEq<Rhs: ?Sized = Self> {
-    /// This method tests for `self` and `other` values to be equal, and is used
-    /// by `==`.
+    /// Tests for `self` and `other` values to be equal, and is used by `==`.
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[rustc_diagnostic_item = "cmp_partialeq_eq"]
     fn eq(&self, other: &Rhs) -> bool;
 
-    /// This method tests for `!=`. The default implementation is almost always
-    /// sufficient, and should not be overridden without very good reason.
+    /// Tests for `!=`. The default implementation is almost always sufficient,
+    /// and should not be overridden without very good reason.
     #[inline]
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
@@ -379,7 +377,7 @@ pub struct AssertParamIsEq<T: Eq + ?Sized> {
 // This is a lang item only so that `BinOp::Cmp` in MIR can return it.
 // It has no special behaviour, but does require that the three variants
 // `Less`/`Equal`/`Greater` remain `-1_i8`/`0_i8`/`+1_i8` respectively.
-#[cfg_attr(not(bootstrap), lang = "Ordering")]
+#[lang = "Ordering"]
 #[repr(i8)]
 pub enum Ordering {
     /// An ordering where a compared value is less than another.
@@ -688,8 +686,8 @@ impl<T: Clone> Clone for Reverse<T> {
     }
 
     #[inline]
-    fn clone_from(&mut self, other: &Self) {
-        self.0.clone_from(&other.0)
+    fn clone_from(&mut self, source: &Self) {
+        self.0.clone_from(&source.0)
     }
 }
 
@@ -852,7 +850,7 @@ pub trait Ord: Eq + PartialOrd<Self> {
     #[stable(feature = "ord_max_min", since = "1.21.0")]
     #[inline]
     #[must_use]
-    #[cfg_attr(not(bootstrap), rustc_diagnostic_item = "cmp_ord_max")]
+    #[rustc_diagnostic_item = "cmp_ord_max"]
     fn max(self, other: Self) -> Self
     where
         Self: Sized,
@@ -873,7 +871,7 @@ pub trait Ord: Eq + PartialOrd<Self> {
     #[stable(feature = "ord_max_min", since = "1.21.0")]
     #[inline]
     #[must_use]
-    #[cfg_attr(not(bootstrap), rustc_diagnostic_item = "cmp_ord_min")]
+    #[rustc_diagnostic_item = "cmp_ord_min"]
     fn min(self, other: Self) -> Self
     where
         Self: Sized,
@@ -898,6 +896,7 @@ pub trait Ord: Eq + PartialOrd<Self> {
     /// assert_eq!(2.clamp(-2, 1), 1);
     /// ```
     #[must_use]
+    #[inline]
     #[stable(feature = "clamp", since = "1.50.0")]
     fn clamp(self, min: Self, max: Self) -> Self
     where
@@ -1160,10 +1159,10 @@ pub trait PartialOrd<Rhs: ?Sized = Self>: PartialEq<Rhs> {
     /// ```
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[cfg_attr(not(bootstrap), rustc_diagnostic_item = "cmp_partialord_cmp")]
+    #[rustc_diagnostic_item = "cmp_partialord_cmp"]
     fn partial_cmp(&self, other: &Rhs) -> Option<Ordering>;
 
-    /// This method tests less than (for `self` and `other`) and is used by the `<` operator.
+    /// Tests less than (for `self` and `other`) and is used by the `<` operator.
     ///
     /// # Examples
     ///
@@ -1175,13 +1174,13 @@ pub trait PartialOrd<Rhs: ?Sized = Self>: PartialEq<Rhs> {
     #[inline]
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[cfg_attr(not(bootstrap), rustc_diagnostic_item = "cmp_partialord_lt")]
+    #[rustc_diagnostic_item = "cmp_partialord_lt"]
     fn lt(&self, other: &Rhs) -> bool {
         matches!(self.partial_cmp(other), Some(Less))
     }
 
-    /// This method tests less than or equal to (for `self` and `other`) and is used by the `<=`
-    /// operator.
+    /// Tests less than or equal to (for `self` and `other`) and is used by the
+    /// `<=` operator.
     ///
     /// # Examples
     ///
@@ -1193,12 +1192,13 @@ pub trait PartialOrd<Rhs: ?Sized = Self>: PartialEq<Rhs> {
     #[inline]
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[cfg_attr(not(bootstrap), rustc_diagnostic_item = "cmp_partialord_le")]
+    #[rustc_diagnostic_item = "cmp_partialord_le"]
     fn le(&self, other: &Rhs) -> bool {
         matches!(self.partial_cmp(other), Some(Less | Equal))
     }
 
-    /// This method tests greater than (for `self` and `other`) and is used by the `>` operator.
+    /// Tests greater than (for `self` and `other`) and is used by the `>`
+    /// operator.
     ///
     /// # Examples
     ///
@@ -1210,13 +1210,13 @@ pub trait PartialOrd<Rhs: ?Sized = Self>: PartialEq<Rhs> {
     #[inline]
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[cfg_attr(not(bootstrap), rustc_diagnostic_item = "cmp_partialord_gt")]
+    #[rustc_diagnostic_item = "cmp_partialord_gt"]
     fn gt(&self, other: &Rhs) -> bool {
         matches!(self.partial_cmp(other), Some(Greater))
     }
 
-    /// This method tests greater than or equal to (for `self` and `other`) and is used by the `>=`
-    /// operator.
+    /// Tests greater than or equal to (for `self` and `other`) and is used by
+    /// the `>=` operator.
     ///
     /// # Examples
     ///
@@ -1228,7 +1228,7 @@ pub trait PartialOrd<Rhs: ?Sized = Self>: PartialEq<Rhs> {
     #[inline]
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[cfg_attr(not(bootstrap), rustc_diagnostic_item = "cmp_partialord_ge")]
+    #[rustc_diagnostic_item = "cmp_partialord_ge"]
     fn ge(&self, other: &Rhs) -> bool {
         matches!(self.partial_cmp(other), Some(Greater | Equal))
     }
@@ -1474,8 +1474,7 @@ mod impls {
     macro_rules! partial_eq_impl {
         ($($t:ty)*) => ($(
             #[stable(feature = "rust1", since = "1.0.0")]
-            #[rustc_const_unstable(feature = "const_cmp", issue = "92391")]
-            impl const PartialEq for $t {
+            impl PartialEq for $t {
                 #[inline]
                 fn eq(&self, other: &$t) -> bool { (*self) == (*other) }
                 #[inline]
@@ -1497,11 +1496,8 @@ mod impls {
     }
 
     partial_eq_impl! {
-        bool char usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f32 f64
+        bool char usize u8 u16 u32 u64 u128 isize i8 i16 i32 i64 i128 f16 f32 f64 f128
     }
-
-    #[cfg(not(bootstrap))]
-    partial_eq_impl! { f16 f128 }
 
     macro_rules! eq_impl {
         ($($t:ty)*) => ($(
@@ -1553,10 +1549,7 @@ mod impls {
         }
     }
 
-    partial_ord_impl! { f32 f64 }
-
-    #[cfg(not(bootstrap))]
-    partial_ord_impl! { f16 f128 }
+    partial_ord_impl! { f16 f32 f64 f128 }
 
     macro_rules! ord_impl {
         ($($t:ty)*) => ($(
@@ -1564,14 +1557,7 @@ mod impls {
             impl PartialOrd for $t {
                 #[inline]
                 fn partial_cmp(&self, other: &$t) -> Option<Ordering> {
-                    #[cfg(bootstrap)]
-                    {
-                        Some(self.cmp(other))
-                    }
-                    #[cfg(not(bootstrap))]
-                    {
-                        Some(crate::intrinsics::three_way_compare(*self, *other))
-                    }
+                    Some(crate::intrinsics::three_way_compare(*self, *other))
                 }
                 #[inline(always)]
                 fn lt(&self, other: &$t) -> bool { (*self) < (*other) }
@@ -1587,18 +1573,7 @@ mod impls {
             impl Ord for $t {
                 #[inline]
                 fn cmp(&self, other: &$t) -> Ordering {
-                    #[cfg(bootstrap)]
-                    {
-                        // The order here is important to generate more optimal assembly.
-                        // See <https://github.com/rust-lang/rust/issues/63758> for more info.
-                        if *self < *other { Less }
-                        else if *self == *other { Equal }
-                        else { Greater }
-                    }
-                    #[cfg(not(bootstrap))]
-                    {
-                        crate::intrinsics::three_way_compare(*self, *other)
-                    }
+                    crate::intrinsics::three_way_compare(*self, *other)
                 }
             }
         )*)

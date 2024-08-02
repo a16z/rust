@@ -3,30 +3,28 @@
 use std::iter::once;
 use std::sync::Arc;
 
-use thin_vec::{thin_vec, ThinVec};
-
-use rustc_ast as ast;
 use rustc_data_structures::fx::FxHashSet;
-use rustc_hir as hir;
 use rustc_hir::def::{DefKind, Res};
 use rustc_hir::def_id::{DefId, DefIdSet, LocalModDefId};
 use rustc_hir::Mutability;
 use rustc_metadata::creader::{CStore, LoadedMacro};
 use rustc_middle::ty::fast_reject::SimplifiedType;
 use rustc_middle::ty::{self, TyCtxt};
+use rustc_span::def_id::LOCAL_CRATE;
 use rustc_span::hygiene::MacroKind;
 use rustc_span::symbol::{kw, sym, Symbol};
+use thin_vec::{thin_vec, ThinVec};
+use {rustc_ast as ast, rustc_hir as hir};
 
+use super::Item;
 use crate::clean::{
     self, clean_bound_vars, clean_generics, clean_impl_item, clean_middle_assoc_item,
-    clean_middle_field, clean_middle_ty, clean_poly_fn_sig, clean_trait_ref_with_bindings,
+    clean_middle_field, clean_middle_ty, clean_poly_fn_sig, clean_trait_ref_with_constraints,
     clean_ty, clean_ty_alias_inner_type, clean_ty_generics, clean_variant_def, utils, Attributes,
     AttributesExt, ImplKind, ItemId, Type,
 };
 use crate::core::DocContext;
 use crate::formats::item_type::ItemType;
-
-use super::Item;
 
 /// Attempt to inline a definition into this AST.
 ///
@@ -62,8 +60,6 @@ pub(crate) fn try_inline(
         attrs_without_docs.as_ref().map(|(attrs, def_id)| (&attrs[..], *def_id));
 
     let import_def_id = attrs.and_then(|(_, def_id)| def_id);
-
-    let (attrs, cfg) = merge_attrs(cx, load_attrs(cx, did), attrs);
 
     let kind = match res {
         Res::Def(DefKind::Trait, did) => {
@@ -131,10 +127,17 @@ pub(crate) fn try_inline(
         }
         Res::Def(DefKind::Const, did) => {
             record_extern_fqn(cx, did, ItemType::Constant);
-            cx.with_param_env(did, |cx| clean::ConstantItem(build_const(cx, did)))
+            cx.with_param_env(did, |cx| {
+                let ct = build_const_item(cx, did);
+                clean::ConstantItem(Box::new(ct))
+            })
         }
         Res::Def(DefKind::Macro(kind), did) => {
-            let mac = build_macro(cx, did, name, import_def_id, kind, attrs.is_doc_hidden());
+            let is_doc_hidden = cx.tcx.is_doc_hidden(did)
+                || attrs_without_docs
+                    .map(|(attrs, _)| attrs)
+                    .is_some_and(|attrs| utils::attrs_have_doc_flag(attrs.iter(), sym::hidden));
+            let mac = build_macro(cx, did, name, import_def_id, kind, is_doc_hidden);
 
             let type_kind = match kind {
                 MacroKind::Bang => ItemType::Macro,
@@ -148,8 +151,14 @@ pub(crate) fn try_inline(
     };
 
     cx.inlined.insert(did.into());
-    let mut item =
-        clean::Item::from_def_id_and_attrs_and_parts(did, Some(name), kind, Box::new(attrs), cfg);
+    let mut item = crate::clean::generate_item_with_correct_attrs(
+        cx,
+        kind,
+        did,
+        name,
+        import_def_id.and_then(|def_id| def_id.as_local()),
+        None,
+    );
     // The visibility needs to reflect the one from the reexport and not from the "source" DefId.
     item.inline_stmt_id = import_def_id;
     ret.push(item);
@@ -179,6 +188,7 @@ pub(crate) fn try_inline_glob(
                 .iter()
                 .filter(|child| !child.reexport_chain.is_empty())
                 .filter_map(|child| child.res.opt_def_id())
+                .filter(|def_id| !cx.tcx.is_doc_hidden(def_id))
                 .collect();
             let attrs = cx.tcx.hir().attrs(import.hir_id());
             let mut items = build_module_items(
@@ -435,24 +445,24 @@ pub(crate) fn build_impl(
 
     let associated_trait = tcx.impl_trait_ref(did).map(ty::EarlyBinder::skip_binder);
 
+    // Do not inline compiler-internal items unless we're a compiler-internal crate.
+    let is_compiler_internal = |did| {
+        tcx.lookup_stability(did)
+            .is_some_and(|stab| stab.is_unstable() && stab.feature == sym::rustc_private)
+    };
+    let document_compiler_internal = is_compiler_internal(LOCAL_CRATE.as_def_id());
+    let is_directly_public = |cx: &mut DocContext<'_>, did| {
+        cx.cache.effective_visibilities.is_directly_public(tcx, did)
+            && (document_compiler_internal || !is_compiler_internal(did))
+    };
+
     // Only inline impl if the implemented trait is
     // reachable in rustdoc generated documentation
     if !did.is_local()
         && let Some(traitref) = associated_trait
+        && !is_directly_public(cx, traitref.def_id)
     {
-        let did = traitref.def_id;
-        if !cx.cache.effective_visibilities.is_directly_public(tcx, did) {
-            return;
-        }
-
-        if !tcx.features().rustc_private && !cx.render_options.force_unstable_if_unmarked {
-            if let Some(stab) = tcx.lookup_stability(did)
-                && stab.is_unstable()
-                && stab.feature == sym::rustc_private
-            {
-                return;
-            }
-        }
+        return;
     }
 
     let impl_item = match did.as_local() {
@@ -475,21 +485,11 @@ pub(crate) fn build_impl(
 
     // Only inline impl if the implementing type is
     // reachable in rustdoc generated documentation
-    if !did.is_local() {
-        if let Some(did) = for_.def_id(&cx.cache) {
-            if !cx.cache.effective_visibilities.is_directly_public(tcx, did) {
-                return;
-            }
-
-            if !tcx.features().rustc_private && !cx.render_options.force_unstable_if_unmarked {
-                if let Some(stab) = tcx.lookup_stability(did)
-                    && stab.is_unstable()
-                    && stab.feature == sym::rustc_private
-                {
-                    return;
-                }
-            }
-        }
+    if !did.is_local()
+        && let Some(did) = for_.def_id(&cx.cache)
+        && !is_directly_public(cx, did)
+    {
+        return;
     }
 
     let document_hidden = cx.render_options.document_hidden;
@@ -566,7 +566,7 @@ pub(crate) fn build_impl(
     };
     let polarity = tcx.impl_polarity(did);
     let trait_ = associated_trait
-        .map(|t| clean_trait_ref_with_bindings(cx, ty::Binder::dummy(t), ThinVec::new()));
+        .map(|t| clean_trait_ref_with_constraints(cx, ty::Binder::dummy(t), ThinVec::new()));
     if trait_.as_ref().map(|t| t.def_id()) == tcx.lang_items().deref_trait() {
         super::build_deref_target_impls(cx, &trait_items, ret);
     }
@@ -613,7 +613,7 @@ pub(crate) fn build_impl(
         did,
         None,
         clean::ImplItem(Box::new(clean::Impl {
-            unsafety: hir::Unsafety::Normal,
+            safety: hir::Safety::Safe,
             generics,
             trait_,
             for_,
@@ -688,7 +688,7 @@ fn build_module_items(
                                     name: prim_ty.as_sym(),
                                     args: clean::GenericArgs::AngleBracketed {
                                         args: Default::default(),
-                                        bindings: ThinVec::new(),
+                                        constraints: ThinVec::new(),
                                     },
                                 }],
                             },
@@ -717,31 +717,27 @@ pub(crate) fn print_inlined_const(tcx: TyCtxt<'_>, did: DefId) -> String {
     }
 }
 
-fn build_const(cx: &mut DocContext<'_>, def_id: DefId) -> clean::Constant {
+fn build_const_item(cx: &mut DocContext<'_>, def_id: DefId) -> clean::Constant {
     let mut generics =
         clean_ty_generics(cx, cx.tcx.generics_of(def_id), cx.tcx.explicit_predicates_of(def_id));
     clean::simplify::move_bounds_to_generic_parameters(&mut generics);
-
-    clean::Constant {
-        type_: Box::new(clean_middle_ty(
-            ty::Binder::dummy(cx.tcx.type_of(def_id).instantiate_identity()),
-            cx,
-            Some(def_id),
-            None,
-        )),
-        generics,
-        kind: clean::ConstantKind::Extern { def_id },
-    }
+    let ty = clean_middle_ty(
+        ty::Binder::dummy(cx.tcx.type_of(def_id).instantiate_identity()),
+        cx,
+        None,
+        None,
+    );
+    clean::Constant { generics, type_: ty, kind: clean::ConstantKind::Extern { def_id } }
 }
 
 fn build_static(cx: &mut DocContext<'_>, did: DefId, mutable: bool) -> clean::Static {
     clean::Static {
-        type_: clean_middle_ty(
+        type_: Box::new(clean_middle_ty(
             ty::Binder::dummy(cx.tcx.type_of(did).instantiate_identity()),
             cx,
             Some(did),
             None,
-        ),
+        )),
         mutability: if mutable { Mutability::Mut } else { Mutability::Not },
         expr: None,
     }

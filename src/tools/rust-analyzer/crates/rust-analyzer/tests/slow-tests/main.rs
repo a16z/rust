@@ -8,14 +8,11 @@
 //! specific JSON shapes here -- there's little value in such tests, as we can't
 //! be sure without a real client anyway.
 
-#![warn(rust_2018_idioms, unused_lifetimes)]
 #![allow(clippy::disallowed_types)]
 
-#[cfg(not(feature = "in-rust-tree"))]
-mod sourcegen;
+mod ratoml;
 mod support;
 mod testdir;
-mod tidy;
 
 use std::{collections::HashMap, path::PathBuf, time::Instant};
 
@@ -23,22 +20,21 @@ use lsp_types::{
     notification::DidOpenTextDocument,
     request::{
         CodeActionRequest, Completion, Formatting, GotoTypeDefinition, HoverRequest,
-        WillRenameFiles, WorkspaceSymbolRequest,
+        InlayHintRequest, InlayHintResolveRequest, WillRenameFiles, WorkspaceSymbolRequest,
     },
     CodeActionContext, CodeActionParams, CompletionParams, DidOpenTextDocumentParams,
     DocumentFormattingParams, FileRename, FormattingOptions, GotoDefinitionParams, HoverParams,
-    PartialResultParams, Position, Range, RenameFilesParams, TextDocumentItem,
-    TextDocumentPositionParams, WorkDoneProgressParams,
+    InlayHint, InlayHintLabel, InlayHintParams, PartialResultParams, Position, Range,
+    RenameFilesParams, TextDocumentItem, TextDocumentPositionParams, WorkDoneProgressParams,
 };
-use rust_analyzer::lsp::ext::{OnEnter, Runnables, RunnablesParams, UnindexedProject};
+use rust_analyzer::lsp::ext::{OnEnter, Runnables, RunnablesParams};
 use serde_json::json;
 use stdx::format_to_acc;
-use test_utils::skip_slow_tests;
 
-use crate::{
-    support::{project, Project},
-    testdir::TestDir,
-};
+use test_utils::skip_slow_tests;
+use testdir::TestDir;
+
+use crate::support::{project, Project};
 
 #[test]
 fn completes_items_from_standard_library() {
@@ -73,6 +69,148 @@ use std::collections::Spam;
         work_done_progress_params: WorkDoneProgressParams::default(),
     });
     assert!(res.to_string().contains("HashMap"));
+}
+
+#[test]
+fn resolves_inlay_hints() {
+    if skip_slow_tests() {
+        return;
+    }
+
+    let server = Project::with_fixture(
+        r#"
+//- /Cargo.toml
+[package]
+name = "foo"
+version = "0.0.0"
+
+//- /src/lib.rs
+struct Foo;
+fn f() {
+    let x = Foo;
+}
+"#,
+    )
+    .server()
+    .wait_until_workspace_is_loaded();
+
+    let res = server.send_request::<InlayHintRequest>(InlayHintParams {
+        range: Range::new(Position::new(0, 0), Position::new(3, 1)),
+        text_document: server.doc_id("src/lib.rs"),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    });
+    let mut hints = serde_json::from_value::<Option<Vec<InlayHint>>>(res).unwrap().unwrap();
+    let hint = hints.pop().unwrap();
+    assert!(hint.data.is_some());
+    assert!(
+        matches!(&hint.label, InlayHintLabel::LabelParts(parts) if parts[1].location.is_none())
+    );
+    let res = server.send_request::<InlayHintResolveRequest>(hint);
+    let hint = serde_json::from_value::<InlayHint>(res).unwrap();
+    assert!(hint.data.is_none());
+    assert!(
+        matches!(&hint.label, InlayHintLabel::LabelParts(parts) if parts[1].location.is_some())
+    );
+}
+
+#[test]
+fn completes_items_from_standard_library_in_cargo_script() {
+    // this test requires nightly so CI can't run it
+    if skip_slow_tests() || std::env::var("CI").is_ok() {
+        return;
+    }
+
+    let server = Project::with_fixture(
+        r#"
+//- /dependency/Cargo.toml
+[package]
+name = "dependency"
+version = "0.1.0"
+//- /dependency/src/lib.rs
+pub struct SpecialHashMap;
+//- /dependency2/Cargo.toml
+[package]
+name = "dependency2"
+version = "0.1.0"
+//- /dependency2/src/lib.rs
+pub struct SpecialHashMap2;
+//- /src/lib.rs
+#!/usr/bin/env -S cargo +nightly -Zscript
+---
+[dependencies]
+dependency = { path = "../dependency" }
+---
+use dependency::Spam;
+use dependency2::Spam;
+"#,
+    )
+    .with_config(serde_json::json!({
+        "cargo": { "sysroot": null },
+        "linkedProjects": ["src/lib.rs"],
+    }))
+    .server()
+    .wait_until_workspace_is_loaded();
+
+    let res = server.send_request::<Completion>(CompletionParams {
+        text_document_position: TextDocumentPositionParams::new(
+            server.doc_id("src/lib.rs"),
+            Position::new(5, 18),
+        ),
+        context: None,
+        partial_result_params: PartialResultParams::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    });
+    assert!(res.to_string().contains("SpecialHashMap"), "{}", res.to_string());
+
+    let res = server.send_request::<Completion>(CompletionParams {
+        text_document_position: TextDocumentPositionParams::new(
+            server.doc_id("src/lib.rs"),
+            Position::new(6, 18),
+        ),
+        context: None,
+        partial_result_params: PartialResultParams::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    });
+    assert!(!res.to_string().contains("SpecialHashMap"));
+
+    server.write_file_and_save(
+        "src/lib.rs",
+        r#"#!/usr/bin/env -S cargo +nightly -Zscript
+---
+[dependencies]
+dependency2 = { path = "../dependency2" }
+---
+use dependency::Spam;
+use dependency2::Spam;
+"#
+        .to_owned(),
+    );
+
+    let server = server.wait_until_workspace_is_loaded();
+
+    std::thread::sleep(std::time::Duration::from_secs(3));
+
+    let res = server.send_request::<Completion>(CompletionParams {
+        text_document_position: TextDocumentPositionParams::new(
+            server.doc_id("src/lib.rs"),
+            Position::new(5, 18),
+        ),
+        context: None,
+        partial_result_params: PartialResultParams::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    });
+    assert!(!res.to_string().contains("SpecialHashMap"));
+
+    let res = server.send_request::<Completion>(CompletionParams {
+        text_document_position: TextDocumentPositionParams::new(
+            server.doc_id("src/lib.rs"),
+            Position::new(6, 18),
+        ),
+        context: None,
+        partial_result_params: PartialResultParams::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    });
+    assert!(res.to_string().contains("SpecialHashMap"));
 }
 
 #[test]
@@ -115,9 +253,9 @@ fn main() {}
           {
             "args": {
               "cargoArgs": ["test", "--package", "foo", "--test", "spam"],
-              "executableArgs": ["test_eggs", "--exact", "--nocapture"],
-              "cargoExtraArgs": [],
+              "executableArgs": ["test_eggs", "--exact", "--show-output"],
               "overrideCargo": null,
+              "cwd": server.path().join("foo"),
               "workspaceRoot": server.path().join("foo")
             },
             "kind": "cargo",
@@ -137,6 +275,7 @@ fn main() {}
           {
             "args": {
               "overrideCargo": null,
+              "cwd": server.path().join("foo"),
               "workspaceRoot": server.path().join("foo"),
               "cargoArgs": [
                 "test",
@@ -145,10 +284,9 @@ fn main() {}
                 "--test",
                 "spam"
               ],
-              "cargoExtraArgs": [],
               "executableArgs": [
                 "",
-                "--nocapture"
+                "--show-output"
               ]
             },
             "kind": "cargo",
@@ -181,8 +319,8 @@ fn main() {}
             "args": {
               "cargoArgs": ["check", "--package", "foo", "--all-targets"],
               "executableArgs": [],
-              "cargoExtraArgs": [],
               "overrideCargo": null,
+              "cwd": server.path().join("foo"),
               "workspaceRoot": server.path().join("foo")
             },
             "kind": "cargo",
@@ -192,8 +330,8 @@ fn main() {}
             "args": {
               "cargoArgs": ["test", "--package", "foo", "--all-targets"],
               "executableArgs": [],
-              "cargoExtraArgs": [],
               "overrideCargo": null,
+              "cwd": server.path().join("foo"),
               "workspaceRoot": server.path().join("foo")
             },
             "kind": "cargo",
@@ -273,13 +411,13 @@ mod tests {
                     "args": {
                         "overrideCargo": null,
                         "workspaceRoot": server.path().join(runnable),
+                        "cwd": server.path().join(runnable),
                         "cargoArgs": [
                             "test",
                             "--package",
                             runnable,
                             "--all-targets"
                         ],
-                        "cargoExtraArgs": [],
                         "executableArgs": []
                     },
                 },
@@ -288,6 +426,92 @@ mod tests {
             ]),
         );
     }
+}
+
+// The main fn in packages should be run from the workspace root
+#[test]
+fn test_runnables_cwd() {
+    if skip_slow_tests() {
+        return;
+    }
+
+    let server = Project::with_fixture(
+        r#"
+//- /foo/Cargo.toml
+[workspace]
+members = ["mainpkg", "otherpkg"]
+
+//- /foo/mainpkg/Cargo.toml
+[package]
+name = "mainpkg"
+version = "0.1.0"
+
+//- /foo/mainpkg/src/main.rs
+fn main() {}
+
+//- /foo/otherpkg/Cargo.toml
+[package]
+name = "otherpkg"
+version = "0.1.0"
+
+//- /foo/otherpkg/src/lib.rs
+#[test]
+fn otherpkg() {}
+"#,
+    )
+    .root("foo")
+    .server()
+    .wait_until_workspace_is_loaded();
+
+    server.request::<Runnables>(
+        RunnablesParams { text_document: server.doc_id("foo/mainpkg/src/main.rs"), position: None },
+        json!([
+            "{...}",
+            {
+                "label": "cargo test -p mainpkg --all-targets",
+                "kind": "cargo",
+                "args": {
+                    "overrideCargo": null,
+                    "workspaceRoot": server.path().join("foo"),
+                    "cwd": server.path().join("foo"),
+                    "cargoArgs": [
+                        "test",
+                        "--package",
+                        "mainpkg",
+                        "--all-targets"
+                    ],
+                    "executableArgs": []
+                },
+            },
+            "{...}",
+            "{...}"
+        ]),
+    );
+
+    server.request::<Runnables>(
+        RunnablesParams { text_document: server.doc_id("foo/otherpkg/src/lib.rs"), position: None },
+        json!([
+            "{...}",
+            {
+                "label": "cargo test -p otherpkg --all-targets",
+                "kind": "cargo",
+                "args": {
+                    "overrideCargo": null,
+                    "workspaceRoot": server.path().join("foo"),
+                    "cwd": server.path().join("foo").join("otherpkg"),
+                    "cargoArgs": [
+                        "test",
+                        "--package",
+                        "otherpkg",
+                        "--all-targets"
+                    ],
+                    "executableArgs": []
+                },
+            },
+            "{...}",
+            "{...}"
+        ]),
+    );
 }
 
 #[test]
@@ -588,66 +812,6 @@ fn main() {{}}
 }
 
 #[test]
-fn test_opening_a_file_outside_of_indexed_workspace() {
-    if skip_slow_tests() {
-        return;
-    }
-
-    let tmp_dir = TestDir::new();
-    let path = tmp_dir.path();
-
-    let project = json!({
-        "roots": [path],
-        "crates": [ {
-            "root_module": path.join("src/crate_one/lib.rs"),
-            "deps": [],
-            "edition": "2015",
-            "cfg": [ "cfg_atom_1", "feature=\"cfg_1\""],
-        } ]
-    });
-
-    let code = format!(
-        r#"
-//- /rust-project.json
-{project}
-
-//- /src/crate_one/lib.rs
-mod bar;
-
-fn main() {{}}
-"#,
-    );
-
-    let server = Project::with_fixture(&code)
-        .tmp_dir(tmp_dir)
-        .with_config(serde_json::json!({
-            "notifications": {
-                "unindexedProject": true
-            },
-        }))
-        .server()
-        .wait_until_workspace_is_loaded();
-
-    let uri = server.doc_id("src/crate_two/lib.rs").uri;
-    server.notification::<DidOpenTextDocument>(DidOpenTextDocumentParams {
-        text_document: TextDocumentItem {
-            uri: uri.clone(),
-            language_id: "rust".to_owned(),
-            version: 0,
-            text: "/// Docs\nfn foo() {}".to_owned(),
-        },
-    });
-    let expected = json!({
-        "textDocuments": [
-            {
-                "uri": uri
-            }
-        ]
-    });
-    server.expect_notification::<UnindexedProject>(expected);
-}
-
-#[test]
 fn diagnostics_dont_block_typing() {
     if skip_slow_tests() {
         return;
@@ -745,7 +909,7 @@ version = \"0.0.0\"
 
 fn out_dirs_check_impl(root_contains_symlink: bool) {
     if skip_slow_tests() {
-        return;
+        // return;
     }
 
     let mut server = Project::with_fixture(
@@ -917,11 +1081,11 @@ fn resolve_proc_macro() {
         return;
     }
 
-    let sysroot = project_model::Sysroot::discover_no_source(
+    let sysroot = project_model::Sysroot::discover(
         &AbsPathBuf::assert_utf8(std::env::current_dir().unwrap()),
         &Default::default(),
-    )
-    .unwrap();
+        false,
+    );
 
     let proc_macro_server_path = sysroot.discover_proc_macro_srv().unwrap();
 

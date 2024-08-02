@@ -1,13 +1,13 @@
+use core::convert::TryInto;
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use super::*;
 use crate::cell::Cell;
-use crate::fmt;
-use crate::io;
 use crate::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use crate::os::xous::services;
 use crate::sync::Arc;
 use crate::time::Duration;
-use core::convert::TryInto;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use crate::{fmt, io};
 
 macro_rules! unimpl {
     () => {
@@ -331,10 +331,7 @@ impl UdpSocket {
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         if let Some(d) = timeout {
             if d.is_zero() {
-                return Err(io::const_io_error!(
-                    io::ErrorKind::InvalidInput,
-                    &"Zero duration is invalid"
-                ));
+                return Err(io::Error::ZERO_TIMEOUT);
             }
         }
         self.read_timeout
@@ -345,10 +342,7 @@ impl UdpSocket {
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> io::Result<()> {
         if let Some(d) = timeout {
             if d.is_zero() {
-                return Err(io::const_io_error!(
-                    io::ErrorKind::InvalidInput,
-                    &"Zero duration is invalid"
-                ));
+                return Err(io::Error::ZERO_TIMEOUT);
             }
         }
         self.write_timeout

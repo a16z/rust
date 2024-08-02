@@ -1,4 +1,6 @@
+//@compile-flags: -Zmiri-preemption-rate=0
 use std::env;
+use std::thread;
 
 fn main() {
     // Test that miri environment is isolated when communication is disabled.
@@ -23,4 +25,13 @@ fn main() {
     env::remove_var("MIRI_TEST");
     assert_eq!(env::var("MIRI_TEST"), Err(env::VarError::NotPresent));
     println!("{:#?}", env::vars().collect::<Vec<_>>());
+
+    // Do things concurrently, to make sure there's no data race.
+    // We disable preemption to make sure the lock is not contended;
+    // that means we don't hit e.g. the futex codepath on Android (which we don't support).
+    let t = thread::spawn(|| {
+        env::set_var("MIRI_TEST", "42");
+    });
+    env::set_var("MIRI_TEST", "42");
+    t.join().unwrap();
 }

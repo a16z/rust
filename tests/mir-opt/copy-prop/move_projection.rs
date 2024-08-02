@@ -1,19 +1,21 @@
 // skip-filecheck
 // EMIT_MIR_FOR_EACH_PANIC_STRATEGY
-//@ unit-test: CopyProp
+//@ test-mir-pass: CopyProp
 
 #![feature(custom_mir, core_intrinsics)]
 #![allow(unused_assignments)]
 extern crate core;
 use core::intrinsics::mir::*;
 
-fn opaque(_: impl Sized) -> bool { true }
+fn opaque(_: impl Sized) -> bool {
+    true
+}
 
 struct Foo(u8);
 
 #[custom_mir(dialect = "runtime")]
 fn f(a: Foo) -> bool {
-    mir!(
+    mir! {
         {
             let b = a;
             // This is a move out of a copy, so must become a copy of `a.0`.
@@ -26,7 +28,7 @@ fn f(a: Foo) -> bool {
         ret = {
             Return()
         }
-    )
+    }
 }
 
 fn main() {

@@ -1,4 +1,4 @@
-//! Sanity checking performed by rustbuild before actually executing anything.
+//! Sanity checking performed by bootstrap before actually executing anything.
 //!
 //! This module contains the implementation of ensuring that the build
 //! environment looks reasonable before progressing. This will verify that
@@ -9,21 +9,40 @@
 //! practice that's likely not true!
 
 use std::collections::HashMap;
-use std::env;
+#[cfg(not(feature = "bootstrap-self-test"))]
+use std::collections::HashSet;
 use std::ffi::{OsStr, OsString};
-use std::fs;
 use std::path::PathBuf;
-use std::process::Command;
+use std::{env, fs};
 
+#[cfg(not(feature = "bootstrap-self-test"))]
+use crate::builder::Builder;
 use crate::builder::Kind;
+#[cfg(not(feature = "bootstrap-self-test"))]
+use crate::core::build_steps::tool;
 use crate::core::config::Target;
-use crate::utils::helpers::output;
+use crate::utils::exec::command;
 use crate::Build;
 
 pub struct Finder {
     cache: HashMap<OsString, Option<PathBuf>>,
     path: OsString,
 }
+
+// During sanity checks, we search for target names to determine if they exist in the compiler's built-in
+// target list (`rustc --print target-list`). While a target name may be present in the stage2 compiler,
+// it might not yet be included in stage0. In such cases, we handle the targets missing from stage0 in this list.
+//
+// Targets can be removed from this list once they are present in the stage0 compiler (usually by updating the beta compiler of the bootstrap).
+#[cfg(not(feature = "bootstrap-self-test"))]
+const STAGE0_MISSING_TARGETS: &[&str] = &[
+    // just a dummy comment so the list doesn't get onelined
+];
+
+/// Minimum version threshold for libstdc++ required when using prebuilt LLVM
+/// from CI (with`llvm.download-ci-llvm` option).
+#[cfg(not(feature = "bootstrap-self-test"))]
+const LIBSTDCXX_MIN_VERSION_THRESHOLD: usize = 8;
 
 impl Finder {
     pub fn new() -> Self {
@@ -89,20 +108,49 @@ pub fn check(build: &mut Build) {
         cmd_finder.must_have("git");
     }
 
+    // Ensure that a compatible version of libstdc++ is available on the system when using `llvm.download-ci-llvm`.
+    #[cfg(not(feature = "bootstrap-self-test"))]
+    if !build.config.dry_run() && !build.build.is_msvc() && build.config.llvm_from_ci {
+        let builder = Builder::new(build);
+        let libcxx_version = builder.ensure(tool::LibcxxVersionTool { target: build.build });
+
+        match libcxx_version {
+            tool::LibcxxVersion::Gnu(version) => {
+                if LIBSTDCXX_MIN_VERSION_THRESHOLD > version {
+                    eprintln!(
+                        "\nYour system's libstdc++ version is too old for the `llvm.download-ci-llvm` option."
+                    );
+                    eprintln!("Current version detected: '{}'", version);
+                    eprintln!("Minimum required version: '{}'", LIBSTDCXX_MIN_VERSION_THRESHOLD);
+                    eprintln!(
+                        "Consider upgrading libstdc++ or disabling the `llvm.download-ci-llvm` option."
+                    );
+                    eprintln!(
+                        "If you choose to upgrade libstdc++, run `x clean` or delete `build/host/libcxx-version` manually after the upgrade."
+                    );
+                }
+            }
+            tool::LibcxxVersion::Llvm(_) => {
+                // FIXME: Handle libc++ version check.
+            }
+        }
+    }
+
     // We need cmake, but only if we're actually building LLVM or sanitizers.
-    let building_llvm = build
-        .hosts
-        .iter()
-        .map(|host| {
-            build.config.llvm_enabled(*host)
-                && build
-                    .config
-                    .target_config
-                    .get(host)
-                    .map(|config| config.llvm_config.is_none())
-                    .unwrap_or(true)
-        })
-        .any(|build_llvm_ourselves| build_llvm_ourselves);
+    let building_llvm = !build.config.llvm_from_ci
+        && build
+            .hosts
+            .iter()
+            .map(|host| {
+                build.config.llvm_enabled(*host)
+                    && build
+                        .config
+                        .target_config
+                        .get(host)
+                        .map(|config| config.llvm_config.is_none())
+                        .unwrap_or(true)
+            })
+            .any(|build_llvm_ourselves| build_llvm_ourselves);
 
     let need_cmake = building_llvm || build.config.any_sanitizers_to_build();
     if need_cmake && cmd_finder.maybe_have("cmake").is_none() {
@@ -157,6 +205,14 @@ than building it.
         .map(|p| cmd_finder.must_have(p))
         .or_else(|| cmd_finder.maybe_have("reuse"));
 
+    #[cfg(not(feature = "bootstrap-self-test"))]
+    let stage0_supported_target_list: HashSet<String> = crate::utils::helpers::output(
+        command(&build.config.initial_rustc).args(["--print", "target-list"]).as_command_mut(),
+    )
+    .lines()
+    .map(|s| s.to_string())
+    .collect();
+
     // We're gonna build some custom C code here and there, host triples
     // also build some C++ shims for LLVM so we need a C++ compiler.
     for target in &build.targets {
@@ -175,6 +231,54 @@ than building it.
         // skip check for cross-targets
         if skip_target_sanity && target != &build.build {
             continue;
+        }
+
+        // Ignore fake targets that are only used for unit tests in bootstrap.
+        #[cfg(not(feature = "bootstrap-self-test"))]
+        {
+            let mut has_target = false;
+            let target_str = target.to_string();
+
+            let missing_targets_hashset: HashSet<_> =
+                STAGE0_MISSING_TARGETS.iter().map(|t| t.to_string()).collect();
+            let duplicated_targets: Vec<_> =
+                stage0_supported_target_list.intersection(&missing_targets_hashset).collect();
+
+            if !duplicated_targets.is_empty() {
+                println!(
+                    "Following targets supported from the stage0 compiler, please remove them from STAGE0_MISSING_TARGETS list."
+                );
+                for duplicated_target in duplicated_targets {
+                    println!("  {duplicated_target}");
+                }
+                std::process::exit(1);
+            }
+
+            // Check if it's a built-in target.
+            has_target |= stage0_supported_target_list.contains(&target_str);
+            has_target |= STAGE0_MISSING_TARGETS.contains(&target_str.as_str());
+
+            if !has_target {
+                // This might also be a custom target, so check the target file that could have been specified by the user.
+                if let Some(custom_target_path) = env::var_os("RUST_TARGET_PATH") {
+                    let mut target_filename = OsString::from(&target_str);
+                    // Target filename ends with `.json`.
+                    target_filename.push(".json");
+
+                    // Recursively traverse through nested directories.
+                    let walker = walkdir::WalkDir::new(custom_target_path).into_iter();
+                    for entry in walker.filter_map(|e| e.ok()) {
+                        has_target |= entry.file_name() == target_filename;
+                    }
+                }
+            }
+
+            if !has_target {
+                panic!(
+                    "No such target exists in the target list,
+                specify a correct location of the JSON specification file for custom targets!"
+                );
+            }
         }
 
         if !build.config.dry_run() {
@@ -246,7 +350,7 @@ than building it.
             // There are three builds of cmake on windows: MSVC, MinGW, and
             // Cygwin. The Cygwin build does not have generators for Visual
             // Studio, so detect that here and error.
-            let out = output(Command::new("cmake").arg("--help"));
+            let out = command("cmake").arg("--help").run_capture_stdout(build).stdout();
             if !out.contains("Visual Studio") {
                 panic!(
                     "

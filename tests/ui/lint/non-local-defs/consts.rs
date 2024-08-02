@@ -2,7 +2,7 @@
 //@ edition:2021
 //@ rustc-env:CARGO_CRATE_NAME=non_local_def
 
-#![feature(inline_const)]
+#![warn(non_local_definitions)]
 
 struct Test;
 

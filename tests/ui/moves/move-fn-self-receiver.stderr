@@ -132,6 +132,14 @@ LL |     foo_add + Foo;
 LL |     foo_add;
    |     ^^^^^^^ value used here after move
    |
+note: if `Foo` implemented `Clone`, you could clone the value
+  --> $DIR/move-fn-self-receiver.rs:5:1
+   |
+LL | struct Foo;
+   | ^^^^^^^^^^ consider implementing `Clone` for this type
+...
+LL |     foo_add + Foo;
+   |     ------- you could clone this value
 note: calling this operator moves the left-hand side
   --> $SRC_DIR/core/src/ops/arith.rs:LL:COL
 

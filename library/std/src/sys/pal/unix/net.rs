@@ -1,17 +1,15 @@
-use crate::cmp;
+use libc::{c_int, c_void, size_t, sockaddr, socklen_t, MSG_PEEK};
+
 use crate::ffi::CStr;
 use crate::io::{self, BorrowedBuf, BorrowedCursor, IoSlice, IoSliceMut};
-use crate::mem;
 use crate::net::{Shutdown, SocketAddr};
 use crate::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, RawFd};
-use crate::str;
 use crate::sys::fd::FileDesc;
 use crate::sys::pal::unix::IsMinusOne;
 use crate::sys_common::net::{getsockopt, setsockopt, sockaddr_to_addr};
 use crate::sys_common::{AsInner, FromInner, IntoInner};
 use crate::time::{Duration, Instant};
-
-use libc::{c_int, c_void, size_t, sockaddr, socklen_t, MSG_PEEK};
+use crate::{cmp, mem};
 
 cfg_if::cfg_if! {
     if #[cfg(target_vendor = "apple")] {
@@ -47,7 +45,9 @@ pub fn cvt_gai(err: c_int) -> io::Result<()> {
 
     #[cfg(not(target_os = "espidf"))]
     let detail = unsafe {
-        str::from_utf8(CStr::from_ptr(libc::gai_strerror(err)).to_bytes()).unwrap().to_owned()
+        // We can't always expect a UTF-8 environment. When we don't get that luxury,
+        // it's better to give a low-quality error message than none at all.
+        CStr::from_ptr(libc::gai_strerror(err)).to_string_lossy()
     };
 
     #[cfg(target_os = "espidf")]
@@ -86,7 +86,14 @@ impl Socket {
                     // flag to atomically create the socket and set it as
                     // CLOEXEC. On Linux this was added in 2.6.27.
                     let fd = cvt(libc::socket(fam, ty | libc::SOCK_CLOEXEC, 0))?;
-                    Ok(Socket(FileDesc::from_raw_fd(fd)))
+                    let socket = Socket(FileDesc::from_raw_fd(fd));
+
+                    // DragonFlyBSD, FreeBSD and NetBSD use `SO_NOSIGPIPE` as a `setsockopt`
+                    // flag to disable `SIGPIPE` emission on socket.
+                    #[cfg(any(target_os = "freebsd", target_os = "netbsd", target_os = "dragonfly"))]
+                    setsockopt(&socket, libc::SOL_SOCKET, libc::SO_NOSIGPIPE, 1)?;
+
+                    Ok(socket)
                 } else {
                     let fd = cvt(libc::socket(fam, ty, 0))?;
                     let fd = FileDesc::from_raw_fd(fd);
@@ -175,10 +182,7 @@ impl Socket {
         let mut pollfd = libc::pollfd { fd: self.as_raw_fd(), events: libc::POLLOUT, revents: 0 };
 
         if timeout.as_secs() == 0 && timeout.subsec_nanos() == 0 {
-            return Err(io::const_io_error!(
-                io::ErrorKind::InvalidInput,
-                "cannot set a 0 duration timeout",
-            ));
+            return Err(io::Error::ZERO_TIMEOUT);
         }
 
         let start = Instant::now();
@@ -209,16 +213,25 @@ impl Socket {
                 }
                 0 => {}
                 _ => {
-                    // linux returns POLLOUT|POLLERR|POLLHUP for refused connections (!), so look
-                    // for POLLHUP rather than read readiness
-                    if pollfd.revents & libc::POLLHUP != 0 {
-                        let e = self.take_error()?.unwrap_or_else(|| {
-                            io::const_io_error!(
-                                io::ErrorKind::Uncategorized,
-                                "no error set after POLLHUP",
-                            )
-                        });
-                        return Err(e);
+                    if cfg!(target_os = "vxworks") {
+                        // VxWorks poll does not return  POLLHUP or POLLERR in revents. Check if the
+                        // connnection actually succeeded and return ok only when the socket is
+                        // ready and no errors were found.
+                        if let Some(e) = self.take_error()? {
+                            return Err(e);
+                        }
+                    } else {
+                        // linux returns POLLOUT|POLLERR|POLLHUP for refused connections (!), so look
+                        // for POLLHUP or POLLERR rather than read readiness
+                        if pollfd.revents & (libc::POLLHUP | libc::POLLERR) != 0 {
+                            let e = self.take_error()?.unwrap_or_else(|| {
+                                io::const_io_error!(
+                                    io::ErrorKind::Uncategorized,
+                                    "no error set after POLLHUP",
+                                )
+                            });
+                            return Err(e);
+                        }
                     }
 
                     return Ok(());
@@ -360,10 +373,7 @@ impl Socket {
         let timeout = match dur {
             Some(dur) => {
                 if dur.as_secs() == 0 && dur.subsec_nanos() == 0 {
-                    return Err(io::const_io_error!(
-                        io::ErrorKind::InvalidInput,
-                        "cannot set a 0 duration timeout",
-                    ));
+                    return Err(io::Error::ZERO_TIMEOUT);
                 }
 
                 let secs = if dur.as_secs() > libc::time_t::MAX as u64 {

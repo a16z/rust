@@ -8,14 +8,13 @@ use std::{iter, ops::Not};
 use either::Either;
 use hir::{db::DefDatabase, DescendPreference, HasCrate, HasSource, LangItem, Semantics};
 use ide_db::{
-    base_db::FileRange,
     defs::{Definition, IdentClass, NameRefClass, OperatorClass},
     famous_defs::FamousDefs,
     helpers::pick_best_token,
-    FxIndexSet, RootDatabase,
+    FileRange, FxIndexSet, RootDatabase,
 };
-use itertools::Itertools;
-use syntax::{ast, match_ast, AstNode, AstToken, SyntaxKind::*, SyntaxNode, T};
+use itertools::{multizip, Itertools};
+use syntax::{ast, AstNode, SyntaxKind::*, SyntaxNode, T};
 
 use crate::{
     doc_links::token_as_doc_comment,
@@ -33,7 +32,8 @@ pub struct HoverConfig {
     pub keywords: bool,
     pub format: HoverDocFormat,
     pub max_trait_assoc_items_count: Option<usize>,
-    pub max_struct_field_count: Option<usize>,
+    pub max_fields_count: Option<usize>,
+    pub max_enum_variants_count: Option<usize>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -109,7 +109,7 @@ pub(crate) fn hover(
     config: &HoverConfig,
 ) -> Option<RangeInfo<HoverResult>> {
     let sema = &hir::Semantics::new(db);
-    let file = sema.parse(file_id).syntax().clone();
+    let file = sema.parse_guess_edition(file_id).syntax().clone();
     let mut res = if range.is_empty() {
         hover_simple(sema, FilePosition { file_id, offset: range.start() }, file, config)
     } else {
@@ -149,7 +149,7 @@ fn hover_simple(
     if let Some(doc_comment) = token_as_doc_comment(&original_token) {
         cov_mark::hit!(no_highlight_on_comment_hover);
         return doc_comment.get_definition_with_descend_at(sema, offset, |def, node, range| {
-            let res = hover_for_definition(sema, file_id, def, &node, config);
+            let res = hover_for_definition(sema, file_id, def, &node, None, config);
             Some(RangeInfo::new(range, res))
         });
     }
@@ -162,6 +162,7 @@ fn hover_simple(
             file_id,
             Definition::from(resolution?),
             &original_token.parent()?,
+            None,
             config,
         );
         return Some(RangeInfo::new(range, res));
@@ -196,6 +197,29 @@ fn hover_simple(
             descended()
                 .filter_map(|token| {
                     let node = token.parent()?;
+
+                    // special case macro calls, we wanna render the invoked arm index
+                    if let Some(name) = ast::NameRef::cast(node.clone()) {
+                        if let Some(path_seg) =
+                            name.syntax().parent().and_then(ast::PathSegment::cast)
+                        {
+                            if let Some(macro_call) = path_seg
+                                .parent_path()
+                                .syntax()
+                                .parent()
+                                .and_then(ast::MacroCall::cast)
+                            {
+                                if let Some(macro_) = sema.resolve_macro_call(&macro_call) {
+                                    return Some(vec![(
+                                        Definition::Macro(macro_),
+                                        sema.resolve_macro_call_arm(&macro_call),
+                                        node,
+                                    )]);
+                                }
+                            }
+                        }
+                    }
+
                     match IdentClass::classify_node(sema, &node)? {
                         // It's better for us to fall back to the keyword hover here,
                         // rendering poll is very confusing
@@ -204,20 +228,19 @@ fn hover_simple(
                         IdentClass::NameRefClass(NameRefClass::ExternCrateShorthand {
                             decl,
                             ..
-                        }) => Some(vec![(Definition::ExternCrateDecl(decl), node)]),
+                        }) => Some(vec![(Definition::ExternCrateDecl(decl), None, node)]),
 
                         class => Some(
-                            class
-                                .definitions()
-                                .into_iter()
-                                .zip(iter::repeat(node))
+                            multizip((class.definitions(), iter::repeat(None), iter::repeat(node)))
                                 .collect::<Vec<_>>(),
                         ),
                     }
                 })
                 .flatten()
-                .unique_by(|&(def, _)| def)
-                .map(|(def, node)| hover_for_definition(sema, file_id, def, &node, config))
+                .unique_by(|&(def, _, _)| def)
+                .map(|(def, macro_arm, node)| {
+                    hover_for_definition(sema, file_id, def, &node, macro_arm, config)
+                })
                 .reduce(|mut acc: HoverResult, HoverResult { markup, actions }| {
                     acc.actions.extend(actions);
                     acc.markup = Markup::from(format!("{}\n---\n{markup}", acc.markup));
@@ -274,61 +297,8 @@ fn hover_simple(
         })
         // tokens
         .or_else(|| {
-            let mut res = HoverResult::default();
-            match_ast! {
-                match original_token {
-                    ast::String(string) => {
-                        res.markup = Markup::fenced_block_text(format_args!("{}", string.value()?));
-                    },
-                    ast::ByteString(string) => {
-                        res.markup = Markup::fenced_block_text(format_args!("{:?}", string.value()?));
-                    },
-                    ast::CString(string) => {
-                        let val = string.value()?;
-                        res.markup = Markup::fenced_block_text(format_args!("{}", std::str::from_utf8(val.as_ref()).ok()?));
-                    },
-                    ast::Char(char) => {
-                        let mut res = HoverResult::default();
-                        res.markup = Markup::fenced_block_text(format_args!("{}", char.value()?));
-                    },
-                    ast::Byte(byte) => {
-                        res.markup = Markup::fenced_block_text(format_args!("0x{:X}", byte.value()?));
-                    },
-                    ast::FloatNumber(num) => {
-                        res.markup = if num.suffix() == Some("f32") {
-                            match num.value_f32() {
-                                Ok(num) => {
-                                    Markup::fenced_block_text(format_args!("{num} (bits: 0x{:X})", num.to_bits()))
-                                },
-                                Err(e) => {
-                                    Markup::fenced_block_text(format_args!("{e}"))
-                                },
-                            }
-                        } else {
-                            match num.value() {
-                                Ok(num) => {
-                                    Markup::fenced_block_text(format_args!("{num} (bits: 0x{:X})", num.to_bits()))
-                                },
-                                Err(e) => {
-                                    Markup::fenced_block_text(format_args!("{e}"))
-                                },
-                            }
-                        };
-                    },
-                    ast::IntNumber(num) => {
-                        res.markup = match num.value() {
-                            Ok(num) => {
-                                Markup::fenced_block_text(format_args!("{num} (0x{num:X}|0b{num:b})"))
-                            },
-                            Err(e) => {
-                                Markup::fenced_block_text(format_args!("{e}"))
-                            },
-                        };
-                    },
-                    _ => return None
-                }
-            }
-            Some(res)
+            render::literal(sema, original_token.clone())
+                .map(|markup| HoverResult { markup, actions: vec![] })
         });
 
     result.map(|mut res: HoverResult| {
@@ -374,6 +344,7 @@ pub(crate) fn hover_for_definition(
     file_id: FileId,
     def: Definition,
     scope_node: &SyntaxNode,
+    macro_arm: Option<u32>,
     config: &HoverConfig,
 ) -> HoverResult {
     let famous_defs = match &def {
@@ -398,12 +369,13 @@ pub(crate) fn hover_for_definition(
     };
     let notable_traits = def_ty.map(|ty| notable_traits(db, &ty)).unwrap_or_default();
 
-    let markup = render::definition(sema.db, def, famous_defs.as_ref(), &notable_traits, config);
+    let markup =
+        render::definition(sema.db, def, famous_defs.as_ref(), &notable_traits, macro_arm, config);
     HoverResult {
         markup: render::process_markup(sema.db, def, &markup, config),
         actions: [
-            show_implementations_action(sema.db, def),
             show_fn_references_action(sema.db, def),
+            show_implementations_action(sema.db, def),
             runnable_action(sema, def, file_id),
             goto_type_action_for_def(sema.db, def, &notable_traits),
         ]
@@ -481,7 +453,7 @@ fn runnable_action(
         Definition::Module(it) => runnable_mod(sema, it).map(HoverAction::Runnable),
         Definition::Function(func) => {
             let src = func.source(sema.db)?;
-            if src.file_id != file_id.into() {
+            if src.file_id != file_id {
                 cov_mark::hit!(hover_macro_generated_struct_fn_doc_comment);
                 cov_mark::hit!(hover_macro_generated_struct_fn_doc_attr);
                 return None;

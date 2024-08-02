@@ -9,19 +9,9 @@
 
 use core::borrow::{Borrow, BorrowMut};
 use core::iter::FusedIterator;
-use core::mem;
-use core::ptr;
-use core::str::pattern::{DoubleEndedSearcher, Pattern, ReverseSearcher, Searcher};
-use core::unicode::conversions;
-
-use crate::borrow::ToOwned;
-use crate::boxed::Box;
-use crate::slice::{Concat, Join, SliceIndex};
-use crate::string::String;
-use crate::vec::Vec;
-
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::str::pattern;
+use core::str::pattern::{DoubleEndedSearcher, Pattern, ReverseSearcher, Searcher};
 #[stable(feature = "encode_utf16", since = "1.8.0")]
 pub use core::str::EncodeUtf16;
 #[stable(feature = "split_ascii_whitespace", since = "1.34.0")]
@@ -53,8 +43,16 @@ pub use core::str::{RSplit, Split};
 pub use core::str::{RSplitN, SplitN};
 #[stable(feature = "rust1", since = "1.0.0")]
 pub use core::str::{RSplitTerminator, SplitTerminator};
-#[unstable(feature = "utf8_chunks", issue = "99543")]
+#[stable(feature = "utf8_chunks", since = "1.79.0")]
 pub use core::str::{Utf8Chunk, Utf8Chunks};
+use core::unicode::conversions;
+use core::{mem, ptr};
+
+use crate::borrow::ToOwned;
+use crate::boxed::Box;
+use crate::slice::{Concat, Join, SliceIndex};
+use crate::string::String;
+use crate::vec::Vec;
 
 /// Note: `str` in `Concat<str>` is not meaningful here.
 /// This type parameter of the trait only exists to enable another impl.
@@ -206,15 +204,16 @@ impl BorrowMut<str> for String {
 #[stable(feature = "rust1", since = "1.0.0")]
 impl ToOwned for str {
     type Owned = String;
+
     #[inline]
     fn to_owned(&self) -> String {
         unsafe { String::from_utf8_unchecked(self.as_bytes().to_owned()) }
     }
 
+    #[inline]
     fn clone_into(&self, target: &mut String) {
-        let mut b = mem::take(target).into_bytes();
-        self.as_bytes().clone_into(&mut b);
-        *target = unsafe { String::from_utf8_unchecked(b) }
+        target.clear();
+        target.push_str(self);
     }
 }
 
@@ -268,7 +267,7 @@ impl str {
                   without modifying the original"]
     #[stable(feature = "rust1", since = "1.0.0")]
     #[inline]
-    pub fn replace<'a, P: Pattern<'a>>(&'a self, from: P, to: &str) -> String {
+    pub fn replace<P: Pattern>(&self, from: P, to: &str) -> String {
         let mut result = String::new();
         let mut last_end = 0;
         for (start, part) in self.match_indices(from) {
@@ -308,7 +307,7 @@ impl str {
     #[must_use = "this returns the replaced string as a new allocation, \
                   without modifying the original"]
     #[stable(feature = "str_replacen", since = "1.16.0")]
-    pub fn replacen<'a, P: Pattern<'a>>(&'a self, pat: P, to: &str, count: usize) -> String {
+    pub fn replacen<P: Pattern>(&self, pat: P, to: &str, count: usize) -> String {
         // Hope to reduce the times of re-allocation
         let mut result = String::with_capacity(32);
         let mut last_end = 0;
@@ -375,14 +374,16 @@ impl str {
         // Safety: We have written only valid ASCII to our vec
         let mut s = unsafe { String::from_utf8_unchecked(out) };
 
-        for (i, c) in rest[..].char_indices() {
+        for (i, c) in rest.char_indices() {
             if c == 'Σ' {
                 // Σ maps to σ, except at the end of a word where it maps to ς.
                 // This is the only conditional (contextual) but language-independent mapping
                 // in `SpecialCasing.txt`,
                 // so hard-code it rather than have a generic "condition" mechanism.
                 // See https://github.com/rust-lang/rust/issues/26035
-                map_uppercase_sigma(rest, i, &mut s)
+                let out_len = self.len() - rest.len();
+                let sigma_lowercase = map_uppercase_sigma(&self, i + out_len);
+                s.push(sigma_lowercase);
             } else {
                 match conversions::to_lower(c) {
                     [a, '\0', _] => s.push(a),
@@ -400,13 +401,13 @@ impl str {
         }
         return s;
 
-        fn map_uppercase_sigma(from: &str, i: usize, to: &mut String) {
+        fn map_uppercase_sigma(from: &str, i: usize) -> char {
             // See https://www.unicode.org/versions/Unicode7.0.0/ch03.pdf#G33992
             // for the definition of `Final_Sigma`.
             debug_assert!('Σ'.len_utf8() == 2);
             let is_word_final = case_ignorable_then_cased(from[..i].chars().rev())
                 && !case_ignorable_then_cased(from[i + 2..].chars());
-            to.push_str(if is_word_final { "ς" } else { "σ" });
+            if is_word_final { 'ς' } else { 'σ' }
         }
 
         fn case_ignorable_then_cased<I: Iterator<Item = char>>(iter: I) -> bool {

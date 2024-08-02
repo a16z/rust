@@ -1,7 +1,7 @@
 //@ check-pass
 //@ edition:2021
 
-#![feature(inline_const)]
+#![warn(non_local_definitions)]
 
 struct Cat;
 struct Wrap<T>(T);

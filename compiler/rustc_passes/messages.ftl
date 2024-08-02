@@ -14,7 +14,7 @@ passes_abi_of =
     fn_abi_of({$fn_name}) = {$fn_abi}
 
 passes_allow_incoherent_impl =
-    `rustc_allow_incoherent_impl` attribute should be applied to impl items.
+    `rustc_allow_incoherent_impl` attribute should be applied to impl items
     .label = the only currently supported targets are inherent methods
 
 passes_allow_internal_unstable =
@@ -49,24 +49,18 @@ passes_attr_crate_level =
 passes_attr_only_in_functions =
     `{$attr}` attribute can only be used on functions
 
-passes_attr_only_on_main =
-    `{$attr}` attribute can only be used on `fn main()`
-
-passes_attr_only_on_root_main =
-    `{$attr}` attribute can only be used on root `fn main()`
-
 passes_both_ffi_const_and_pure =
     `#[ffi_const]` function cannot be `#[ffi_pure]`
-
-passes_break_inside_async_block =
-    `{$name}` inside of an `async` block
-    .label = cannot `{$name}` inside of an `async` block
-    .async_block_label = enclosing `async` block
 
 passes_break_inside_closure =
     `{$name}` inside of a closure
     .label = cannot `{$name}` inside of a closure
     .closure_label = enclosing closure
+
+passes_break_inside_coroutine =
+    `{$name}` inside `{$kind}` {$source}
+    .label = cannot `{$name}` inside `{$kind}` {$source}
+    .coroutine_label = enclosing `{$kind}` {$source}
 
 passes_break_non_loop =
     `break` with value from a `{$kind}` loop
@@ -74,9 +68,6 @@ passes_break_non_loop =
     .label2 = you can't `break` with a value in a `{$kind}` loop
     .suggestion = use `break` on its own without a value inside this `{$kind}` loop
     .break_expr_suggestion = alternatively, you might have meant to use the available loop label
-
-passes_cannot_inline_naked_function =
-    naked functions cannot be inlined
 
 passes_cannot_stabilize_deprecated =
     an API can't be stabilized after it is deprecated
@@ -109,18 +100,9 @@ passes_continue_labeled_block =
     .label = labeled blocks cannot be `continue`'d
     .block_label = labeled block the `continue` points to
 
-passes_coverage_fn_defn =
-    `#[coverage]` may only be applied to function definitions
-
-passes_coverage_ignored_function_prototype =
-    `#[coverage]` is ignored on function prototypes
-
-passes_coverage_not_coverable =
-    `#[coverage]` must be applied to coverable code
-    .label = not coverable code
-
-passes_coverage_propagate =
-    `#[coverage]` does not propagate into items and must be applied to the contained functions directly
+passes_coverage_not_fn_or_closure =
+    attribute should be applied to a function definition or closure
+    .label = not a function or closure
 
 passes_dead_codes =
     { $multiple ->
@@ -259,8 +241,8 @@ passes_doc_test_unknown_spotlight =
     .no_op_note = `doc(spotlight)` is now a no-op
 
 passes_duplicate_diagnostic_item_in_crate =
-    duplicate diagnostic item in crate `{$crate_name}`: `{$name}`.
-    .note = the diagnostic item is first defined in crate `{$orig_crate_name}`.
+    duplicate diagnostic item in crate `{$crate_name}`: `{$name}`
+    .note = the diagnostic item is first defined in crate `{$orig_crate_name}`
 
 passes_duplicate_feature_err =
     the feature `{$feature}` has already been declared
@@ -269,27 +251,27 @@ passes_duplicate_lang_item =
     found duplicate lang item `{$lang_item_name}`
     .first_defined_span = the lang item is first defined here
     .first_defined_crate_depends = the lang item is first defined in crate `{$orig_crate_name}` (which `{$orig_dependency_of}` depends on)
-    .first_defined_crate = the lang item is first defined in crate `{$orig_crate_name}`.
+    .first_defined_crate = the lang item is first defined in crate `{$orig_crate_name}`
     .first_definition_local = first definition in the local crate (`{$orig_crate_name}`)
     .second_definition_local = second definition in the local crate (`{$crate_name}`)
     .first_definition_path = first definition in `{$orig_crate_name}` loaded from {$orig_path}
     .second_definition_path = second definition in `{$crate_name}` loaded from {$path}
 
 passes_duplicate_lang_item_crate =
-    duplicate lang item in crate `{$crate_name}`: `{$lang_item_name}`.
+    duplicate lang item in crate `{$crate_name}`: `{$lang_item_name}`
     .first_defined_span = the lang item is first defined here
     .first_defined_crate_depends = the lang item is first defined in crate `{$orig_crate_name}` (which `{$orig_dependency_of}` depends on)
-    .first_defined_crate = the lang item is first defined in crate `{$orig_crate_name}`.
+    .first_defined_crate = the lang item is first defined in crate `{$orig_crate_name}`
     .first_definition_local = first definition in the local crate (`{$orig_crate_name}`)
     .second_definition_local = second definition in the local crate (`{$crate_name}`)
     .first_definition_path = first definition in `{$orig_crate_name}` loaded from {$orig_path}
     .second_definition_path = second definition in `{$crate_name}` loaded from {$path}
 
 passes_duplicate_lang_item_crate_depends =
-    duplicate lang item in crate `{$crate_name}` (which `{$dependency_of}` depends on): `{$lang_item_name}`.
+    duplicate lang item in crate `{$crate_name}` (which `{$dependency_of}` depends on): `{$lang_item_name}`
     .first_defined_span = the lang item is first defined here
     .first_defined_crate_depends = the lang item is first defined in crate `{$orig_crate_name}` (which `{$orig_dependency_of}` depends on)
-    .first_defined_crate = the lang item is first defined in crate `{$orig_crate_name}`.
+    .first_defined_crate = the lang item is first defined in crate `{$orig_crate_name}`
     .first_definition_local = first definition in the local crate (`{$orig_crate_name}`)
     .second_definition_local = second definition in the local crate (`{$crate_name}`)
     .first_definition_path = first definition in `{$orig_crate_name}` loaded from {$orig_path}
@@ -305,9 +287,6 @@ passes_export_name =
 passes_extern_main =
     the `main` function cannot be declared in an `extern` block
 
-passes_feature_only_on_nightly =
-    `#![feature]` may not be used on the {$release_channel} release channel
-
 passes_feature_previously_declared =
     feature `{$feature}` is declared {$declared}, but was previously declared {$prev_declared}
 
@@ -321,7 +300,7 @@ passes_ffi_pure_invalid_target =
     `#[ffi_pure]` may only be used on foreign functions
 
 passes_has_incoherent_inherent_impl =
-    `rustc_has_incoherent_inherent_impls` attribute should be applied to types or traits.
+    `rustc_has_incoherent_inherent_impls` attribute should be applied to types or traits
     .label = only adts, extern types and traits are supported
 
 passes_ignored_attr =
@@ -347,13 +326,13 @@ passes_implied_feature_not_exist =
     feature `{$implied_by}` implying `{$feature}` does not exist
 
 passes_incorrect_do_not_recommend_location =
-    `#[do_not_recommend]` can only be placed on trait implementations
+    `#[diagnostic::do_not_recommend]` can only be placed on trait implementations
 
 passes_incorrect_meta_item = expected a quoted string literal
 passes_incorrect_meta_item_suggestion = consider surrounding this with quotes
 
 passes_incorrect_target =
-    `{$name}` language item must be applied to a {$kind} with {$at_least ->
+    `{$name}` lang item must be applied to a {$kind} with {$at_least ->
         [true] at least {$num}
         *[false] {$num}
     } generic {$num ->
@@ -394,12 +373,21 @@ passes_invalid_macro_export_arguments = `{$name}` isn't a valid `#[macro_export]
 
 passes_invalid_macro_export_arguments_too_many_items = `#[macro_export]` can only take 1 or 0 arguments
 
+passes_lang_item_fn = {$name ->
+    [panic_impl] `#[panic_handler]`
+    *[other] `{$name}` lang item
+} function
+
 passes_lang_item_fn_with_target_feature =
-    `{$name}` language item function is not allowed to have `#[target_feature]`
-    .label = `{$name}` language item function is not allowed to have `#[target_feature]`
+    {passes_lang_item_fn} is not allowed to have `#[target_feature]`
+    .label = {passes_lang_item_fn} is not allowed to have `#[target_feature]`
+
+passes_lang_item_fn_with_track_caller =
+    {passes_lang_item_fn} is not allowed to have `#[track_caller]`
+    .label = {passes_lang_item_fn} is not allowed to have `#[target_feature]`
 
 passes_lang_item_on_incorrect_target =
-    `{$name}` language item must be applied to a {$expected_target}
+    `{$name}` lang item must be applied to a {$expected_target}
     .label = attribute should be applied to a {$expected_target}, not a {$actual_target}
 
 passes_layout_abi =
@@ -455,7 +443,7 @@ passes_missing_const_stab_attr =
     {$descr} has missing const stability attribute
 
 passes_missing_lang_item =
-    language item required, but not found: `{$name}`
+    lang item required, but not found: `{$name}`
     .note = this can occur when a binary crate with `#![no_std]` is compiled for a target where `{$name}` is defined in the standard library
     .help = you may be able to compile for a target that doesn't need `{$name}`, specify a target with `--target` or in `.cargo/config`
 
@@ -494,15 +482,17 @@ passes_naked_functions_asm_block =
 passes_naked_functions_asm_options =
     asm options unsupported in naked functions: {$unsupported_options}
 
+passes_naked_functions_incompatible_attribute =
+    attribute incompatible with `#[naked]`
+    .label = the `{$attr}` attribute is incompatible with `#[naked]`
+    .naked_attribute = function marked with `#[naked]` here
+
 passes_naked_functions_must_use_noreturn =
     asm in naked functions must use `noreturn` option
     .suggestion = consider specifying that the asm block is responsible for returning from the function
 
 passes_naked_functions_operands =
     only `const` and `sym` operands are supported in naked functions
-
-passes_naked_tracked_caller =
-    cannot use `#[track_caller]` with `#[naked]`
 
 passes_no_link =
     attribute should be applied to an `extern crate` item
@@ -552,6 +542,10 @@ passes_only_has_effect_on =
         *[unspecified] (unspecified--this is a compiler bug)
     }
 
+passes_optimize_not_fn_or_closure =
+    attribute should be applied to function or closure
+    .label = not a function or closure
+
 passes_outer_crate_level_attr =
     crate-level attribute should be an inner attribute: add an exclamation mark: `#![foo]`
 
@@ -587,6 +581,15 @@ passes_pass_by_value =
     .label = is not a struct, enum or type alias
 
 passes_proc_macro_bad_sig = {$kind} has incorrect signature
+
+passes_remove_fields =
+    consider removing { $num ->
+      [one] this
+     *[other] these
+    } { $num ->
+      [one] field
+     *[other] fields
+    }
 
 passes_repr_conflicting =
     conflicting representation hints
@@ -686,9 +689,6 @@ passes_transparent_incompatible =
 passes_undefined_naked_function_abi =
     Rust ABI is unsupported in naked functions
 
-passes_unix_sigpipe_values =
-    valid values for `#[unix_sigpipe = "..."]` are `inherit`, `sig_ign`, or `sig_dfl`
-
 passes_unknown_external_lang_item =
     unknown external lang item: `{$lang_item}`
 
@@ -696,8 +696,8 @@ passes_unknown_feature =
     unknown feature `{$feature}`
 
 passes_unknown_lang_item =
-    definition of an unknown language item: `{$name}`
-    .label = definition of unknown language item `{$name}`
+    definition of an unknown lang item: `{$name}`
+    .label = definition of unknown lang item `{$name}`
 
 passes_unlabeled_cf_in_while_condition =
     `break` or `continue` with no label in the condition of a `while` loop
@@ -782,6 +782,7 @@ passes_used_compiler_linker =
 
 passes_used_static =
     attribute must be applied to a `static` variable
+    .label = but this is a {$target}
 
 passes_useless_assignment =
     useless assignment of {$is_field_assign ->

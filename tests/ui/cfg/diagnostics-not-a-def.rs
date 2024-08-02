@@ -1,4 +1,5 @@
 pub mod inner {
+    #[expect(unexpected_cfgs)]
     pub fn i_am_here() {
         #[cfg(feature = "another one that doesn't exist")]
         loop {}

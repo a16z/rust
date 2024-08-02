@@ -16,17 +16,15 @@ mod tests;
 mod spin_mutex;
 mod unsafe_list;
 
-use crate::num::NonZero;
-use crate::ops::{Deref, DerefMut};
-use crate::panic::{self, AssertUnwindSafe};
-use crate::time::Duration;
-
-use super::abi::thread;
-use super::abi::usercalls;
 use fortanix_sgx_abi::{Tcs, EV_UNPARK, WAIT_INDEFINITE};
 
 pub use self::spin_mutex::{try_lock_or_false, SpinMutex, SpinMutexGuard};
 use self::unsafe_list::{UnsafeList, UnsafeListEntry};
+use super::abi::{thread, usercalls};
+use crate::num::NonZero;
+use crate::ops::{Deref, DerefMut};
+use crate::panic::{self, AssertUnwindSafe};
+use crate::time::Duration;
 
 /// An queue entry in a `WaitQueue`.
 struct WaitEntry {
@@ -52,10 +50,6 @@ impl<T> WaitVariable<T> {
         WaitVariable { queue: WaitQueue::new(), lock: var }
     }
 
-    pub fn queue_empty(&self) -> bool {
-        self.queue.is_empty()
-    }
-
     pub fn lock_var(&self) -> &T {
         &self.lock
     }
@@ -68,7 +62,7 @@ impl<T> WaitVariable<T> {
 #[derive(Copy, Clone)]
 pub enum NotifiedTcs {
     Single(Tcs),
-    All { count: NonZero<usize> },
+    All { _count: NonZero<usize> },
 }
 
 /// An RAII guard that will notify a set of target threads as well as unlock
@@ -95,19 +89,6 @@ unsafe impl Send for WaitQueue {}
 impl Default for WaitQueue {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-impl<'a, T> WaitGuard<'a, T> {
-    /// Returns which TCSes will be notified when this guard drops.
-    pub fn notified_tcs(&self) -> NotifiedTcs {
-        self.notified_tcs
-    }
-
-    /// Drop this `WaitGuard`, after dropping another `guard`.
-    pub fn drop_after<U>(self, guard: U) {
-        drop(guard);
-        drop(self);
     }
 }
 
@@ -139,10 +120,6 @@ impl<'a, T> Drop for WaitGuard<'a, T> {
 impl WaitQueue {
     pub const fn new() -> Self {
         WaitQueue { inner: UnsafeList::new() }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inner.is_empty()
     }
 
     /// Adds the calling thread to the `WaitVariable`'s wait queue, then wait
@@ -253,7 +230,10 @@ impl WaitQueue {
             }
 
             if let Some(count) = NonZero::new(count) {
-                Ok(WaitGuard { mutex_guard: Some(guard), notified_tcs: NotifiedTcs::All { count } })
+                Ok(WaitGuard {
+                    mutex_guard: Some(guard),
+                    notified_tcs: NotifiedTcs::All { _count: count },
+                })
             } else {
                 Err(guard)
             }

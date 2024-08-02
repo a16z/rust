@@ -1,10 +1,10 @@
 //! Client-side types.
 
-use super::*;
-
 use std::cell::RefCell;
 use std::marker::PhantomData;
 use std::sync::atomic::AtomicU32;
+
+use super::*;
 
 macro_rules! define_client_handles {
     (
@@ -51,9 +51,7 @@ macro_rules! define_client_handles {
 
             impl<S> Encode<S> for $oty {
                 fn encode(self, w: &mut Writer, s: &mut S) {
-                    let handle = self.handle;
-                    mem::forget(self);
-                    handle.encode(w, s);
+                    mem::ManuallyDrop::new(self).handle.encode(w, s);
                 }
             }
 
@@ -192,9 +190,10 @@ impl<'a> !Sync for Bridge<'a> {}
 
 #[allow(unsafe_code)]
 mod state {
-    use super::Bridge;
     use std::cell::{Cell, RefCell};
     use std::ptr;
+
+    use super::Bridge;
 
     thread_local! {
         static BRIDGE_STATE: Cell<*const ()> = const { Cell::new(ptr::null()) };
@@ -283,7 +282,11 @@ fn maybe_install_panic_hook(force_show_panics: bool) {
     HIDE_PANICS_DURING_EXPANSION.call_once(|| {
         let prev = panic::take_hook();
         panic::set_hook(Box::new(move |info| {
-            if force_show_panics || !is_available() {
+            // We normally report panics by catching unwinds and passing the payload from the
+            // unwind back to the compiler, but if the panic doesn't unwind we'll abort before
+            // the compiler has a chance to print an error. So we special-case PanicInfo where
+            // can_unwind is false.
+            if force_show_panics || !is_available() || !info.can_unwind() {
                 prev(info)
             }
         }));

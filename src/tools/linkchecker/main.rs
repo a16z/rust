@@ -14,20 +14,18 @@
 //! A few exceptions are allowed as there's known bugs in rustdoc, but this
 //! should catch the majority of "broken link" cases.
 
-use html5ever::tendril::ByteTendril;
-use html5ever::tokenizer::{
-    BufferQueue, TagToken, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
-};
-use once_cell::sync::Lazy;
-use regex::Regex;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
-use std::env;
-use std::fs;
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
+use std::{env, fs};
+
+use html5ever::tendril::ByteTendril;
+use html5ever::tokenizer::{
+    BufferQueue, TagToken, Token, TokenSink, TokenSinkResult, Tokenizer, TokenizerOpts,
+};
 
 // Add linkcheck exceptions here
 // If at all possible you should use intra-doc links to avoid linkcheck issues. These
@@ -61,6 +59,8 @@ const INTRA_DOC_LINK_EXCEPTIONS: &[(&str, &[&str])] = &[
     // This is being used in the sense of 'inclusive range', not a markdown link
     ("core/ops/struct.RangeInclusive.html", &["begin</code>, <code>end"]),
     ("std/ops/struct.RangeInclusive.html", &["begin</code>, <code>end"]),
+    ("core/range/legacy/struct.RangeInclusive.html", &["begin</code>, <code>end"]),
+    ("std/range/legacy/struct.RangeInclusive.html", &["begin</code>, <code>end"]),
     ("core/slice/trait.SliceIndex.html", &["begin</code>, <code>end"]),
     ("alloc/slice/trait.SliceIndex.html", &["begin</code>, <code>end"]),
     ("std/slice/trait.SliceIndex.html", &["begin</code>, <code>end"]),
@@ -69,8 +69,12 @@ const INTRA_DOC_LINK_EXCEPTIONS: &[(&str, &[&str])] = &[
 
 ];
 
-static BROKEN_INTRA_DOC_LINK: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r#"\[<code>(.*)</code>\]"#).unwrap());
+macro_rules! static_regex {
+    ($re:literal) => {{
+        static RE: ::std::sync::OnceLock<::regex::Regex> = ::std::sync::OnceLock::new();
+        RE.get_or_init(|| ::regex::Regex::new($re).unwrap())
+    }};
+}
 
 macro_rules! t {
     ($e:expr) => {
@@ -373,7 +377,7 @@ impl Checker {
         // Search for intra-doc links that rustdoc didn't warn about
         // NOTE: only looks at one line at a time; in practice this should find most links
         for (i, line) in source.lines().enumerate() {
-            for broken_link in BROKEN_INTRA_DOC_LINK.captures_iter(line) {
+            for broken_link in static_regex!(r#"\[<code>(.*)</code>\]"#).captures_iter(line) {
                 if is_intra_doc_exception(file, &broken_link[1]) {
                     report.intra_doc_exceptions += 1;
                 } else {
@@ -501,7 +505,7 @@ fn maybe_redirect(source: &str) -> Option<String> {
 
 fn parse_html<Sink: TokenSink>(source: &str, sink: Sink) -> Sink {
     let tendril: ByteTendril = source.as_bytes().into();
-    let mut input = BufferQueue::new();
+    let mut input = BufferQueue::default();
     input.push_back(tendril.try_reinterpret().unwrap());
 
     let mut tok = Tokenizer::new(sink, TokenizerOpts::default());

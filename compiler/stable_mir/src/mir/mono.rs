@@ -1,19 +1,22 @@
+use std::fmt::{Debug, Formatter};
+use std::io;
+
+use serde::Serialize;
+
 use crate::abi::FnAbi;
 use crate::crate_def::CrateDef;
 use crate::mir::Body;
 use crate::ty::{Allocation, ClosureDef, ClosureKind, FnDef, GenericArgs, IndexedVal, Ty};
 use crate::{with, CrateItem, DefId, Error, ItemKind, Opaque, Symbol};
-use std::fmt::{Debug, Formatter};
-use std::io;
 
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum MonoItem {
     Fn(Instance),
     Static(StaticDef),
     GlobalAsm(Opaque),
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Serialize)]
 pub struct Instance {
     /// The type of instance.
     pub kind: InstanceKind,
@@ -22,7 +25,7 @@ pub struct Instance {
     pub def: InstanceDef,
 }
 
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 pub enum InstanceKind {
     /// A user defined item.
     Item,
@@ -41,12 +44,21 @@ impl Instance {
         with(|cx| cx.instance_args(self.def))
     }
 
-    /// Get the body of an Instance. The body will be eagerly monomorphized.
+    /// Get the body of an Instance.
+    ///
+    /// The body will be eagerly monomorphized and all constants will already be evaluated.
+    ///
+    /// This method will return the intrinsic fallback body if one was defined.
     pub fn body(&self) -> Option<Body> {
         with(|context| context.instance_body(self.def))
     }
 
     /// Check whether this instance has a body available.
+    ///
+    /// For intrinsics with fallback body, this will return `true`. It is up to the user to decide
+    /// whether to specialize the intrinsic or to use its fallback body.
+    ///
+    /// For more information on fallback body, see <https://github.com/rust-lang/rust/issues/93145>.
     ///
     /// This call is much cheaper than `instance.body().is_some()`, since it doesn't try to build
     /// the StableMIR body.
@@ -97,7 +109,9 @@ impl Instance {
     /// which is more convenient to match with intrinsic symbols.
     pub fn intrinsic_name(&self) -> Option<Symbol> {
         match self.kind {
-            InstanceKind::Intrinsic => Some(with(|context| context.intrinsic_name(self.def))),
+            InstanceKind::Intrinsic => {
+                Some(with(|context| context.intrinsic(self.def.def_id()).unwrap().fn_name()))
+            }
             InstanceKind::Item | InstanceKind::Virtual { .. } | InstanceKind::Shim => None,
         }
     }
@@ -148,7 +162,10 @@ impl Instance {
     /// When generating code for a Drop terminator, users can ignore an empty drop glue.
     /// These shims are only needed to generate a valid Drop call done via VTable.
     pub fn is_empty_shim(&self) -> bool {
-        self.kind == InstanceKind::Shim && with(|cx| cx.is_empty_drop_shim(self.def))
+        self.kind == InstanceKind::Shim
+            && with(|cx| {
+                cx.is_empty_drop_shim(self.def) || cx.is_empty_async_drop_ctor_shim(self.def)
+            })
     }
 
     /// Try to constant evaluate the instance into a constant with the given type.
@@ -226,7 +243,7 @@ impl From<StaticDef> for CrateItem {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct InstanceDef(usize);
 
 impl CrateDef for InstanceDef {
@@ -237,6 +254,7 @@ impl CrateDef for InstanceDef {
 
 crate_def! {
     /// Holds information about a static variable definition.
+    #[derive(Serialize)]
     pub StaticDef;
 }
 

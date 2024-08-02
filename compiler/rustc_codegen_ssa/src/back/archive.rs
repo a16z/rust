@@ -1,22 +1,20 @@
+use std::error::Error;
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+use ar_archive_writer::{write_archive_to_stream, ArchiveKind, NewArchiveMember};
+pub use ar_archive_writer::{ObjectReader, DEFAULT_OBJECT_READER};
+use object::read::archive::ArchiveFile;
+use object::read::macho::FatArch;
 use rustc_data_structures::fx::FxIndexSet;
 use rustc_data_structures::memmap::Mmap;
 use rustc_session::cstore::DllImport;
 use rustc_session::Session;
 use rustc_span::symbol::Symbol;
-
-use super::metadata::search_for_section;
-
-pub use ar_archive_writer::get_native_object_symbols;
-use ar_archive_writer::{write_archive_to_stream, ArchiveKind, NewArchiveMember};
-use object::read::archive::ArchiveFile;
-use object::read::macho::FatArch;
 use tempfile::Builder as TempFileBuilder;
 
-use std::error::Error;
-use std::fs::File;
-use std::io::{self, Write};
-use std::path::{Path, PathBuf};
-
+use super::metadata::search_for_section;
 // Re-exporting for rustc_codegen_llvm::back::archive
 pub use crate::errors::{ArchiveBuildFailure, ExtractBundledLibsError, UnknownArchiveKind};
 
@@ -89,8 +87,7 @@ pub trait ArchiveBuilder {
 #[must_use = "must call build() to finish building the archive"]
 pub struct ArArchiveBuilder<'a> {
     sess: &'a Session,
-    get_object_symbols:
-        fn(buf: &[u8], f: &mut dyn FnMut(&[u8]) -> io::Result<()>) -> io::Result<bool>,
+    object_reader: &'static ObjectReader,
 
     src_archives: Vec<(PathBuf, Mmap)>,
     // Don't use an `HashMap` here, as the order is important. `lib.rmeta` needs
@@ -105,25 +102,17 @@ enum ArchiveEntry {
 }
 
 impl<'a> ArArchiveBuilder<'a> {
-    pub fn new(
-        sess: &'a Session,
-        get_object_symbols: fn(
-            buf: &[u8],
-            f: &mut dyn FnMut(&[u8]) -> io::Result<()>,
-        ) -> io::Result<bool>,
-    ) -> ArArchiveBuilder<'a> {
-        ArArchiveBuilder { sess, get_object_symbols, src_archives: vec![], entries: vec![] }
+    pub fn new(sess: &'a Session, object_reader: &'static ObjectReader) -> ArArchiveBuilder<'a> {
+        ArArchiveBuilder { sess, object_reader, src_archives: vec![], entries: vec![] }
     }
 }
 
 fn try_filter_fat_archs(
-    archs: object::read::Result<&[impl FatArch]>,
+    archs: &[impl FatArch],
     target_arch: object::Architecture,
     archive_path: &Path,
     archive_map_data: &[u8],
 ) -> io::Result<Option<PathBuf>> {
-    let archs = archs.map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-
     let desired = match archs.iter().find(|a| a.architecture() == target_arch) {
         Some(a) => a,
         None => return Ok(None),
@@ -153,17 +142,15 @@ pub fn try_extract_macho_fat_archive(
         _ => return Ok(None),
     };
 
-    match object::macho::FatHeader::parse(&*archive_map) {
-        Ok(h) if h.magic.get(object::endian::BigEndian) == object::macho::FAT_MAGIC => {
-            let archs = object::macho::FatHeader::parse_arch32(&*archive_map);
-            try_filter_fat_archs(archs, target_arch, archive_path, &*archive_map)
-        }
-        Ok(h) if h.magic.get(object::endian::BigEndian) == object::macho::FAT_MAGIC_64 => {
-            let archs = object::macho::FatHeader::parse_arch64(&*archive_map);
-            try_filter_fat_archs(archs, target_arch, archive_path, &*archive_map)
-        }
+    if let Ok(h) = object::read::macho::MachOFatFile32::parse(&*archive_map) {
+        let archs = h.arches();
+        try_filter_fat_archs(archs, target_arch, archive_path, &*archive_map)
+    } else if let Ok(h) = object::read::macho::MachOFatFile64::parse(&*archive_map) {
+        let archs = h.arches();
+        try_filter_fat_archs(archs, target_arch, archive_path, &*archive_map)
+    } else {
         // Not a FatHeader at all, just return None.
-        _ => Ok(None),
+        Ok(None)
     }
 }
 
@@ -220,7 +207,9 @@ impl<'a> ArchiveBuilder for ArArchiveBuilder<'a> {
         let sess = self.sess;
         match self.build_inner(output) {
             Ok(any_members) => any_members,
-            Err(e) => sess.dcx().emit_fatal(ArchiveBuildFailure { error: e }),
+            Err(error) => {
+                sess.dcx().emit_fatal(ArchiveBuildFailure { path: output.to_owned(), error })
+            }
         }
     }
 }
@@ -231,11 +220,7 @@ impl<'a> ArArchiveBuilder<'a> {
             "gnu" => ArchiveKind::Gnu,
             "bsd" => ArchiveKind::Bsd,
             "darwin" => ArchiveKind::Darwin,
-            "coff" => {
-                // FIXME: ar_archive_writer doesn't support COFF archives yet.
-                // https://github.com/rust-lang/ar_archive_writer/issues/9
-                ArchiveKind::Gnu
-            }
+            "coff" => ArchiveKind::Coff,
             "aix_big" => ArchiveKind::AixBig,
             kind => {
                 self.sess.dcx().emit_fatal(UnknownArchiveKind { kind });
@@ -267,7 +252,7 @@ impl<'a> ArArchiveBuilder<'a> {
 
             entries.push(NewArchiveMember {
                 buf: data,
-                get_symbols: self.get_object_symbols,
+                object_reader: self.object_reader,
                 member_name: String::from_utf8(entry_name).unwrap(),
                 mtime: 0,
                 uid: 0,
@@ -280,18 +265,26 @@ impl<'a> ArArchiveBuilder<'a> {
         // This prevents programs (including rustc) from attempting to read a partial archive.
         // It also enables writing an archive with the same filename as a dependency on Windows as
         // required by a test.
-        let mut archive_tmpfile = TempFileBuilder::new()
+        // The tempfile crate currently uses 0o600 as mode for the temporary files and directories
+        // it creates. We need it to be the default mode for back compat reasons however. (See
+        // #107495) To handle this we are telling tempfile to create a temporary directory instead
+        // and then inside this directory create a file using File::create.
+        let archive_tmpdir = TempFileBuilder::new()
             .suffix(".temp-archive")
-            .tempfile_in(output.parent().unwrap_or_else(|| Path::new("")))
-            .map_err(|err| io_error_context("couldn't create a temp file", err))?;
+            .tempdir_in(output.parent().unwrap_or_else(|| Path::new("")))
+            .map_err(|err| {
+                io_error_context("couldn't create a directory for the temp file", err)
+            })?;
+        let archive_tmpfile_path = archive_tmpdir.path().join("tmp.a");
+        let mut archive_tmpfile = File::create_new(&archive_tmpfile_path)
+            .map_err(|err| io_error_context("couldn't create the temp file", err))?;
 
         write_archive_to_stream(
-            archive_tmpfile.as_file_mut(),
+            &mut archive_tmpfile,
             &entries,
-            true,
             archive_kind,
-            true,
             false,
+            /* is_ec = */ self.sess.target.arch == "arm64ec",
         )?;
 
         let any_entries = !entries.is_empty();
@@ -300,9 +293,11 @@ impl<'a> ArArchiveBuilder<'a> {
         // output archive to the same location as an input archive on Windows.
         drop(self.src_archives);
 
-        archive_tmpfile
-            .persist(output)
-            .map_err(|err| io_error_context("failed to rename archive file", err.error))?;
+        fs::rename(archive_tmpfile_path, output)
+            .map_err(|err| io_error_context("failed to rename archive file", err))?;
+        archive_tmpdir
+            .close()
+            .map_err(|err| io_error_context("failed to remove temporary directory", err))?;
 
         Ok(any_entries)
     }

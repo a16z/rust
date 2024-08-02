@@ -9,16 +9,18 @@
 use std::{fmt, mem, ops};
 
 use cfg::CfgOptions;
+use intern::Symbol;
 use la_arena::{Arena, Idx, RawIdx};
 use rustc_hash::{FxHashMap, FxHashSet};
-use span::Edition;
-use syntax::SmolStr;
+use span::{Edition, EditionedFileId};
 use triomphe::Arc;
 use vfs::{file_set::FileSet, AbsPathBuf, AnchoredPath, FileId, VfsPath};
 
-// Map from crate id to the name of the crate and path of the proc-macro. If the value is `None`,
-// then the crate for the proc-macro hasn't been build yet as the build data is missing.
-pub type ProcMacroPaths = FxHashMap<CrateId, Result<(Option<String>, AbsPathBuf), String>>;
+pub type ProcMacroPaths = FxHashMap<CrateId, Result<(String, AbsPathBuf), String>>;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SourceRootId(pub u32);
+
 /// Files are grouped into source roots. A source root is a directory on the
 /// file systems which is watched for changes. Typically it corresponds to a
 /// Rust crate. Source roots *might* be nested: in this case, a file belongs to
@@ -26,9 +28,6 @@ pub type ProcMacroPaths = FxHashMap<CrateId, Result<(Option<String>, AbsPathBuf)
 /// source root, and the analyzer does not know the root path of the source root at
 /// all. So, a file from one source root can't refer to a file in another source
 /// root by path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct SourceRootId(pub u32);
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SourceRoot {
     /// Sysroot or crates.io library.
@@ -98,8 +97,8 @@ impl fmt::Debug for CrateGraph {
 
 pub type CrateId = Idx<CrateData>;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct CrateName(SmolStr);
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CrateName(Symbol);
 
 impl CrateName {
     /// Creates a crate name, checking for dashes in the string provided.
@@ -109,16 +108,16 @@ impl CrateName {
         if name.contains('-') {
             Err(name)
         } else {
-            Ok(Self(SmolStr::new(name)))
+            Ok(Self(Symbol::intern(name)))
         }
     }
 
     /// Creates a crate name, unconditionally replacing the dashes with underscores.
     pub fn normalize_dashes(name: &str) -> CrateName {
-        Self(SmolStr::new(name.replace('-', "_")))
+        Self(Symbol::intern(&name.replace('-', "_")))
     }
 
-    pub fn as_smol_str(&self) -> &SmolStr {
+    pub fn symbol(&self) -> &Symbol {
         &self.0
     }
 }
@@ -132,7 +131,7 @@ impl fmt::Display for CrateName {
 impl ops::Deref for CrateName {
     type Target = str;
     fn deref(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }
 
@@ -140,11 +139,11 @@ impl ops::Deref for CrateName {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CrateOrigin {
     /// Crates that are from the rustc workspace.
-    Rustc { name: String },
+    Rustc { name: Symbol },
     /// Crates that are workspace members.
-    Local { repo: Option<String>, name: Option<String> },
+    Local { repo: Option<String>, name: Option<Symbol> },
     /// Crates that are non member libraries.
-    Library { repo: Option<String>, name: String },
+    Library { repo: Option<String>, name: Symbol },
     /// Crates that are provided by the language, like std, core, proc-macro, ...
     Lang(LangCrateOrigin),
 }
@@ -200,16 +199,16 @@ impl fmt::Display for LangCrateOrigin {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CrateDisplayName {
     // The name we use to display various paths (with `_`).
     crate_name: CrateName,
     // The name as specified in Cargo.toml (with `-`).
-    canonical_name: String,
+    canonical_name: Symbol,
 }
 
 impl CrateDisplayName {
-    pub fn canonical_name(&self) -> &str {
+    pub fn canonical_name(&self) -> &Symbol {
         &self.canonical_name
     }
     pub fn crate_name(&self) -> &CrateName {
@@ -219,7 +218,7 @@ impl CrateDisplayName {
 
 impl From<CrateName> for CrateDisplayName {
     fn from(crate_name: CrateName) -> CrateDisplayName {
-        let canonical_name = crate_name.to_string();
+        let canonical_name = crate_name.0.clone();
         CrateDisplayName { crate_name, canonical_name }
     }
 }
@@ -238,9 +237,9 @@ impl ops::Deref for CrateDisplayName {
 }
 
 impl CrateDisplayName {
-    pub fn from_canonical_name(canonical_name: String) -> CrateDisplayName {
-        let crate_name = CrateName::normalize_dashes(&canonical_name);
-        CrateDisplayName { crate_name, canonical_name }
+    pub fn from_canonical_name(canonical_name: &str) -> CrateDisplayName {
+        let crate_name = CrateName::normalize_dashes(canonical_name);
+        CrateDisplayName { crate_name, canonical_name: Symbol::intern(canonical_name) }
     }
 }
 
@@ -285,18 +284,37 @@ pub struct CrateData {
     /// For purposes of analysis, crates are anonymous (only names in
     /// `Dependency` matters), this name should only be used for UI.
     pub display_name: Option<CrateDisplayName>,
-    pub cfg_options: CfgOptions,
+    pub cfg_options: Arc<CfgOptions>,
     /// The cfg options that could be used by the crate
-    pub potential_cfg_options: Option<CfgOptions>,
+    pub potential_cfg_options: Option<Arc<CfgOptions>>,
     pub env: Env,
     pub dependencies: Vec<Dependency>,
     pub origin: CrateOrigin,
     pub is_proc_macro: bool,
 }
 
-#[derive(Default, Debug, Clone, PartialEq, Eq)]
+#[derive(Default, Clone, PartialEq, Eq)]
 pub struct Env {
     entries: FxHashMap<String, String>,
+}
+
+impl fmt::Debug for Env {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        struct EnvDebug<'s>(Vec<(&'s String, &'s String)>);
+
+        impl fmt::Debug for EnvDebug<'_> {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.debug_map().entries(self.0.iter().copied()).finish()
+            }
+        }
+        f.debug_struct("Env")
+            .field("entries", &{
+                let mut entries: Vec<_> = self.entries.iter().collect();
+                entries.sort();
+                EnvDebug(entries)
+            })
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -304,20 +322,26 @@ pub struct Dependency {
     pub crate_id: CrateId,
     pub name: CrateName,
     prelude: bool,
+    sysroot: bool,
 }
 
 impl Dependency {
     pub fn new(name: CrateName, crate_id: CrateId) -> Self {
-        Self { name, crate_id, prelude: true }
+        Self { name, crate_id, prelude: true, sysroot: false }
     }
 
-    pub fn with_prelude(name: CrateName, crate_id: CrateId, prelude: bool) -> Self {
-        Self { name, crate_id, prelude }
+    pub fn with_prelude(name: CrateName, crate_id: CrateId, prelude: bool, sysroot: bool) -> Self {
+        Self { name, crate_id, prelude, sysroot }
     }
 
     /// Whether this dependency is to be added to the depending crate's extern prelude.
     pub fn is_prelude(&self) -> bool {
         self.prelude
+    }
+
+    /// Whether this dependency is a sysroot injected one.
+    pub fn is_sysroot(&self) -> bool {
+        self.sysroot
     }
 }
 
@@ -328,12 +352,13 @@ impl CrateGraph {
         edition: Edition,
         display_name: Option<CrateDisplayName>,
         version: Option<String>,
-        cfg_options: CfgOptions,
-        potential_cfg_options: Option<CfgOptions>,
-        env: Env,
+        cfg_options: Arc<CfgOptions>,
+        potential_cfg_options: Option<Arc<CfgOptions>>,
+        mut env: Env,
         is_proc_macro: bool,
         origin: CrateOrigin,
     ) -> CrateId {
+        env.entries.shrink_to_fit();
         let data = CrateData {
             root_file_id,
             edition,
@@ -385,7 +410,7 @@ impl CrateGraph {
         from: CrateId,
         dep: Dependency,
     ) -> Result<(), CyclicDependenciesError> {
-        let _p = tracing::span!(tracing::Level::INFO, "add_dep").entered();
+        let _p = tracing::info_span!("add_dep").entered();
 
         self.check_cycle_after_dependency(from, dep.crate_id)?;
 
@@ -635,6 +660,10 @@ impl CrateData {
     fn add_dep(&mut self, dep: Dependency) {
         self.dependencies.push(dep)
     }
+
+    pub fn root_file_id(&self) -> EditionedFileId {
+        EditionedFileId::new(self.root_file_id, self.edition)
+    }
 }
 
 impl Extend<(String, String)> for Env {
@@ -650,16 +679,24 @@ impl FromIterator<(String, String)> for Env {
 }
 
 impl Env {
-    pub fn set(&mut self, env: &str, value: String) {
-        self.entries.insert(env.to_owned(), value);
+    pub fn set(&mut self, env: &str, value: impl Into<String>) {
+        self.entries.insert(env.to_owned(), value.into());
     }
 
     pub fn get(&self, env: &str) -> Option<String> {
         self.entries.get(env).cloned()
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&str, &str)> {
-        self.entries.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+    pub fn extend_from_other(&mut self, other: &Env) {
+        self.entries.extend(other.entries.iter().map(|(x, y)| (x.to_owned(), y.to_owned())));
+    }
+}
+
+impl From<Env> for Vec<(String, String)> {
+    fn from(env: Env) -> Vec<(String, String)> {
+        let mut entries: Vec<_> = env.entries.into_iter().collect();
+        entries.sort();
+        entries
     }
 }
 

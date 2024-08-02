@@ -1803,9 +1803,7 @@ fn brute_force_rotate_test_1() {
 #[test]
 #[cfg(not(target_arch = "wasm32"))]
 fn sort_unstable() {
-    use core::cmp::Ordering::{Equal, Greater, Less};
-    use core::slice::heapsort;
-    use rand::{seq::SliceRandom, Rng};
+    use rand::Rng;
 
     // Miri is too slow (but still need to `chain` to make the types match)
     let lens = if cfg!(miri) { (2..20).chain(0..0) } else { (2..25).chain(500..510) };
@@ -1839,29 +1837,8 @@ fn sort_unstable() {
                 tmp.copy_from_slice(v);
                 tmp.sort_unstable_by(|a, b| b.cmp(a));
                 assert!(tmp.windows(2).all(|w| w[0] >= w[1]));
-
-                // Test heapsort using `<` operator.
-                tmp.copy_from_slice(v);
-                heapsort(tmp, |a, b| a < b);
-                assert!(tmp.windows(2).all(|w| w[0] <= w[1]));
-
-                // Test heapsort using `>` operator.
-                tmp.copy_from_slice(v);
-                heapsort(tmp, |a, b| a > b);
-                assert!(tmp.windows(2).all(|w| w[0] >= w[1]));
             }
         }
-    }
-
-    // Sort using a completely random comparison function.
-    // This will reorder the elements *somehow*, but won't panic.
-    for i in 0..v.len() {
-        v[i] = i as i32;
-    }
-    v.sort_unstable_by(|_, _| *[Less, Equal, Greater].choose(&mut rng).unwrap());
-    v.sort_unstable();
-    for i in 0..v.len() {
-        assert_eq!(v[i], i as i32);
     }
 
     // Should not panic.
@@ -1879,6 +1856,7 @@ fn sort_unstable() {
 #[cfg_attr(miri, ignore)] // Miri is too slow
 fn select_nth_unstable() {
     use core::cmp::Ordering::{Equal, Greater, Less};
+
     use rand::seq::SliceRandom;
     use rand::Rng;
 
@@ -2609,14 +2587,14 @@ fn test_slice_from_ptr_range() {
 #[should_panic = "slice len overflow"]
 fn test_flatten_size_overflow() {
     let x = &[[(); usize::MAX]; 2][..];
-    let _ = x.flatten();
+    let _ = x.as_flattened();
 }
 
 #[test]
 #[should_panic = "slice len overflow"]
 fn test_flatten_mut_size_overflow() {
     let x = &mut [[(); usize::MAX]; 2][..];
-    let _ = x.flatten_mut();
+    let _ = x.as_flattened_mut();
 }
 
 #[test]
@@ -2677,4 +2655,17 @@ fn test_get_many_mut_oob_empty() {
 fn test_get_many_mut_duplicate() {
     let mut v = vec![1, 2, 3, 4, 5];
     assert!(v.get_many_mut([1, 3, 3, 4]).is_err());
+}
+
+#[test]
+fn test_slice_from_raw_parts_in_const() {
+    static FANCY: i32 = 4;
+    static FANCY_SLICE: &[i32] = unsafe { std::slice::from_raw_parts(&FANCY, 1) };
+    assert_eq!(FANCY_SLICE.as_ptr(), std::ptr::addr_of!(FANCY));
+    assert_eq!(FANCY_SLICE.len(), 1);
+
+    const EMPTY_SLICE: &[i32] =
+        unsafe { std::slice::from_raw_parts(std::ptr::without_provenance(123456), 0) };
+    assert_eq!(EMPTY_SLICE.as_ptr().addr(), 123456);
+    assert_eq!(EMPTY_SLICE.len(), 0);
 }

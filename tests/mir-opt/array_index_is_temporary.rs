@@ -1,4 +1,4 @@
-//@ unit-test: SimplifyCfg-pre-optimizations
+//@ test-mir-pass: SimplifyCfg-pre-optimizations
 // EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 // Retagging (from Stacked Borrows) relies on the array index being a fresh
 // temporary, so that side-effects cannot change it.
@@ -8,7 +8,6 @@ unsafe fn foo(z: *mut usize) -> u32 {
     *z = 2;
     99
 }
-
 
 // EMIT_MIR array_index_is_temporary.main.SimplifyCfg-pre-optimizations.after.mir
 fn main() {

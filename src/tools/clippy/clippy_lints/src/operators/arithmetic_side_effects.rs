@@ -1,4 +1,5 @@
 use super::ARITHMETIC_SIDE_EFFECTS;
+use clippy_config::Conf;
 use clippy_utils::consts::{constant, constant_simple, Constant};
 use clippy_utils::diagnostics::span_lint;
 use clippy_utils::ty::is_type_diagnostic_item;
@@ -7,54 +8,55 @@ use rustc_data_structures::fx::{FxHashMap, FxHashSet};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::{self, Ty};
 use rustc_session::impl_lint_pass;
-use rustc_span::source_map::Spanned;
 use rustc_span::symbol::sym;
 use rustc_span::{Span, Symbol};
 use {rustc_ast as ast, rustc_hir as hir};
 
-const HARD_CODED_ALLOWED_BINARY: &[[&str; 2]] = &[["f32", "f32"], ["f64", "f64"], ["std::string::String", "str"]];
-const HARD_CODED_ALLOWED_UNARY: &[&str] = &["f32", "f64", "std::num::Saturating", "std::num::Wrapping"];
-const INTEGER_METHODS: &[Symbol] = &[
-    sym::saturating_div,
-    sym::wrapping_div,
-    sym::wrapping_rem,
-    sym::wrapping_rem_euclid,
-];
-
-#[derive(Debug)]
 pub struct ArithmeticSideEffects {
-    allowed_binary: FxHashMap<String, FxHashSet<String>>,
-    allowed_unary: FxHashSet<String>,
+    allowed_binary: FxHashMap<&'static str, FxHashSet<&'static str>>,
+    allowed_unary: FxHashSet<&'static str>,
     // Used to check whether expressions are constants, such as in enum discriminants and consts
     const_span: Option<Span>,
+    disallowed_int_methods: FxHashSet<Symbol>,
     expr_span: Option<Span>,
-    integer_methods: FxHashSet<Symbol>,
 }
 
 impl_lint_pass!(ArithmeticSideEffects => [ARITHMETIC_SIDE_EFFECTS]);
 
 impl ArithmeticSideEffects {
-    #[must_use]
-    pub fn new(user_allowed_binary: Vec<[String; 2]>, user_allowed_unary: Vec<String>) -> Self {
-        let mut allowed_binary: FxHashMap<String, FxHashSet<String>> = <_>::default();
-        for [lhs, rhs] in user_allowed_binary.into_iter().chain(
-            HARD_CODED_ALLOWED_BINARY
-                .iter()
-                .copied()
-                .map(|[lhs, rhs]| [lhs.to_string(), rhs.to_string()]),
-        ) {
+    pub fn new(conf: &'static Conf) -> Self {
+        let mut allowed_binary = FxHashMap::<&'static str, FxHashSet<&'static str>>::default();
+        let mut allowed_unary = FxHashSet::<&'static str>::default();
+
+        allowed_unary.extend(["f32", "f64", "std::num::Saturating", "std::num::Wrapping"]);
+        allowed_unary.extend(conf.arithmetic_side_effects_allowed_unary.iter().map(|x| &**x));
+        allowed_binary.extend([
+            ("f32", FxHashSet::from_iter(["f32"])),
+            ("f64", FxHashSet::from_iter(["f64"])),
+            ("std::string::String", FxHashSet::from_iter(["str"])),
+        ]);
+        for [lhs, rhs] in &conf.arithmetic_side_effects_allowed_binary {
             allowed_binary.entry(lhs).or_default().insert(rhs);
         }
-        let allowed_unary = user_allowed_unary
-            .into_iter()
-            .chain(HARD_CODED_ALLOWED_UNARY.iter().copied().map(String::from))
-            .collect();
+        for s in &conf.arithmetic_side_effects_allowed {
+            allowed_binary.entry(s).or_default().insert("*");
+            allowed_binary.entry("*").or_default().insert(s);
+            allowed_unary.insert(s);
+        }
+
         Self {
             allowed_binary,
             allowed_unary,
+            disallowed_int_methods: [
+                sym::saturating_div,
+                sym::wrapping_div,
+                sym::wrapping_rem,
+                sym::wrapping_rem_euclid,
+            ]
+            .into_iter()
+            .collect(),
             const_span: None,
             expr_span: None,
-            integer_methods: INTEGER_METHODS.iter().copied().collect(),
         }
     }
 
@@ -91,10 +93,10 @@ impl ArithmeticSideEffects {
     fn has_specific_allowed_type_and_operation<'tcx>(
         cx: &LateContext<'tcx>,
         lhs_ty: Ty<'tcx>,
-        op: &Spanned<hir::BinOpKind>,
+        op: hir::BinOpKind,
         rhs_ty: Ty<'tcx>,
     ) -> bool {
-        let is_div_or_rem = matches!(op.node, hir::BinOpKind::Div | hir::BinOpKind::Rem);
+        let is_div_or_rem = matches!(op, hir::BinOpKind::Div | hir::BinOpKind::Rem);
         let is_non_zero_u = |cx: &LateContext<'tcx>, ty: Ty<'tcx>| {
             let tcx = cx.tcx;
 
@@ -166,13 +168,35 @@ impl ArithmeticSideEffects {
         None
     }
 
+    /// Methods like `add_assign` are send to their `BinOps` references.
+    fn manage_sugar_methods<'tcx>(
+        &mut self,
+        cx: &LateContext<'tcx>,
+        expr: &'tcx hir::Expr<'_>,
+        lhs: &'tcx hir::Expr<'_>,
+        ps: &hir::PathSegment<'_>,
+        rhs: &'tcx hir::Expr<'_>,
+    ) {
+        if ps.ident.name == sym::add || ps.ident.name == sym::add_assign {
+            self.manage_bin_ops(cx, expr, hir::BinOpKind::Add, lhs, rhs);
+        } else if ps.ident.name == sym::div || ps.ident.name == sym::div_assign {
+            self.manage_bin_ops(cx, expr, hir::BinOpKind::Div, lhs, rhs);
+        } else if ps.ident.name == sym::mul || ps.ident.name == sym::mul_assign {
+            self.manage_bin_ops(cx, expr, hir::BinOpKind::Mul, lhs, rhs);
+        } else if ps.ident.name == sym::rem || ps.ident.name == sym::rem_assign {
+            self.manage_bin_ops(cx, expr, hir::BinOpKind::Rem, lhs, rhs);
+        } else if ps.ident.name == sym::sub || ps.ident.name == sym::sub_assign {
+            self.manage_bin_ops(cx, expr, hir::BinOpKind::Sub, lhs, rhs);
+        }
+    }
+
     /// Manages when the lint should be triggered. Operations in constant environments, hard coded
-    /// types, custom allowed types and non-constant operations that won't overflow are ignored.
+    /// types, custom allowed types and non-constant operations that don't overflow are ignored.
     fn manage_bin_ops<'tcx>(
         &mut self,
         cx: &LateContext<'tcx>,
         expr: &'tcx hir::Expr<'_>,
-        op: &Spanned<hir::BinOpKind>,
+        op: hir::BinOpKind,
         lhs: &'tcx hir::Expr<'_>,
         rhs: &'tcx hir::Expr<'_>,
     ) {
@@ -180,7 +204,7 @@ impl ArithmeticSideEffects {
             return;
         }
         if !matches!(
-            op.node,
+            op,
             hir::BinOpKind::Add
                 | hir::BinOpKind::Div
                 | hir::BinOpKind::Mul
@@ -204,7 +228,7 @@ impl ArithmeticSideEffects {
             return;
         }
         let has_valid_op = if Self::is_integral(lhs_ty) && Self::is_integral(rhs_ty) {
-            if let hir::BinOpKind::Shl | hir::BinOpKind::Shr = op.node {
+            if let hir::BinOpKind::Shl | hir::BinOpKind::Shr = op {
                 // At least for integers, shifts are already handled by the CTFE
                 return;
             }
@@ -213,7 +237,7 @@ impl ArithmeticSideEffects {
                 Self::literal_integer(cx, actual_rhs),
             ) {
                 (None, None) => false,
-                (None, Some(n)) => match (&op.node, n) {
+                (None, Some(n)) => match (&op, n) {
                     // Division and module are always valid if applied to non-zero integers
                     (hir::BinOpKind::Div | hir::BinOpKind::Rem, local_n) if local_n != 0 => true,
                     // Adding or subtracting zeros is always a no-op
@@ -223,7 +247,7 @@ impl ArithmeticSideEffects {
                     => true,
                     _ => false,
                 },
-                (Some(n), None) => match (&op.node, n) {
+                (Some(n), None) => match (&op, n) {
                     // Adding or subtracting zeros is always a no-op
                     (hir::BinOpKind::Add | hir::BinOpKind::Sub, 0)
                     // Multiplication by 1 or 0 will never overflow
@@ -249,6 +273,7 @@ impl ArithmeticSideEffects {
         &mut self,
         args: &'tcx [hir::Expr<'_>],
         cx: &LateContext<'tcx>,
+        expr: &'tcx hir::Expr<'_>,
         ps: &'tcx hir::PathSegment<'_>,
         receiver: &'tcx hir::Expr<'_>,
     ) {
@@ -262,7 +287,8 @@ impl ArithmeticSideEffects {
         if !Self::is_integral(instance_ty) {
             return;
         }
-        if !self.integer_methods.contains(&ps.ident.name) {
+        self.manage_sugar_methods(cx, expr, receiver, ps, arg);
+        if !self.disallowed_int_methods.contains(&ps.ident.name) {
             return;
         }
         let (actual_arg, _) = peel_hir_expr_refs(arg);
@@ -310,10 +336,10 @@ impl<'tcx> LateLintPass<'tcx> for ArithmeticSideEffects {
         }
         match &expr.kind {
             hir::ExprKind::AssignOp(op, lhs, rhs) | hir::ExprKind::Binary(op, lhs, rhs) => {
-                self.manage_bin_ops(cx, expr, op, lhs, rhs);
+                self.manage_bin_ops(cx, expr, op.node, lhs, rhs);
             },
             hir::ExprKind::MethodCall(ps, receiver, args, _) => {
-                self.manage_method_call(args, cx, ps, receiver);
+                self.manage_method_call(args, cx, expr, ps, receiver);
             },
             hir::ExprKind::Unary(un_op, un_expr) => {
                 self.manage_unary_ops(cx, expr, un_expr, *un_op);

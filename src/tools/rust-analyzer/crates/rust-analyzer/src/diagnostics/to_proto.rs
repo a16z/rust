@@ -66,10 +66,15 @@ fn location(
     let uri = url_from_abs_path(&file_name);
 
     let range = {
-        let position_encoding = snap.config.position_encoding();
+        let position_encoding = snap.config.negotiated_encoding();
         lsp_types::Range::new(
-            position(&position_encoding, span, span.line_start, span.column_start),
-            position(&position_encoding, span, span.line_end, span.column_end),
+            position(
+                &position_encoding,
+                span,
+                span.line_start,
+                span.column_start.saturating_sub(1),
+            ),
+            position(&position_encoding, span, span.line_end, span.column_end.saturating_sub(1)),
         )
     };
     lsp_types::Location::new(uri, range)
@@ -78,10 +83,10 @@ fn location(
 fn position(
     position_encoding: &PositionEncoding,
     span: &DiagnosticSpan,
-    line_offset: usize,
+    line_number: usize,
     column_offset_utf32: usize,
 ) -> lsp_types::Position {
-    let line_index = line_offset - span.line_start;
+    let line_index = line_number - span.line_start;
 
     let column_offset_encoded = match span.text.get(line_index) {
         // Fast path.
@@ -104,8 +109,8 @@ fn position(
     };
 
     lsp_types::Position {
-        line: (line_offset as u32).saturating_sub(1),
-        character: (column_offset_encoded as u32).saturating_sub(1),
+        line: (line_number as u32).saturating_sub(1),
+        character: column_offset_encoded as u32,
     }
 }
 
@@ -541,6 +546,7 @@ mod tests {
                 workspace_root.to_path_buf(),
                 ClientCapabilities::default(),
                 Vec::new(),
+                None,
                 None,
             ),
         );

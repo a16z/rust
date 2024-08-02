@@ -23,54 +23,48 @@ struct Epoll {
 struct EpollEvent {
     #[allow(dead_code)]
     events: u32,
-    /// `Scalar<Provenance>` is used to represent the
+    /// `Scalar` is used to represent the
     /// `epoll_data` type union.
     #[allow(dead_code)]
-    data: Scalar<Provenance>,
+    data: Scalar,
 }
 
-impl FileDescriptor for Epoll {
+impl FileDescription for Epoll {
     fn name(&self) -> &'static str {
         "epoll"
-    }
-
-    fn dup(&mut self) -> io::Result<Box<dyn FileDescriptor>> {
-        // FIXME: this is probably wrong -- check if the `dup`ed descriptor truly uses an
-        // independent event set.
-        Ok(Box::new(self.clone()))
     }
 
     fn close<'tcx>(
         self: Box<Self>,
         _communicate_allowed: bool,
-    ) -> InterpResult<'tcx, io::Result<i32>> {
-        Ok(Ok(0))
+    ) -> InterpResult<'tcx, io::Result<()>> {
+        Ok(Ok(()))
     }
 }
 
-impl<'mir, 'tcx: 'mir> EvalContextExt<'mir, 'tcx> for crate::MiriInterpCx<'mir, 'tcx> {}
-pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
+impl<'tcx> EvalContextExt<'tcx> for crate::MiriInterpCx<'tcx> {}
+pub trait EvalContextExt<'tcx>: crate::MiriInterpCxExt<'tcx> {
     /// This function returns a file descriptor referring to the new `Epoll` instance. This file
     /// descriptor is used for all subsequent calls to the epoll interface. If the `flags` argument
     /// is 0, then this function is the same as `epoll_create()`.
     ///
     /// <https://linux.die.net/man/2/epoll_create1>
-    fn epoll_create1(
-        &mut self,
-        flags: &OpTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+    fn epoll_create1(&mut self, flags: &OpTy<'tcx>) -> InterpResult<'tcx, Scalar> {
         let this = self.eval_context_mut();
 
         let flags = this.read_scalar(flags)?.to_i32()?;
 
         let epoll_cloexec = this.eval_libc_i32("EPOLL_CLOEXEC");
-        if flags == epoll_cloexec {
-            // Miri does not support exec, so this flag has no effect.
-        } else if flags != 0 {
-            throw_unsup_format!("epoll_create1 flags {flags} are not implemented");
+
+        // Miri does not support exec, so EPOLL_CLOEXEC flag has no effect.
+        if flags != epoll_cloexec && flags != 0 {
+            throw_unsup_format!(
+                "epoll_create1: flag {:#x} is unsupported, only 0 or EPOLL_CLOEXEC are allowed",
+                flags
+            );
         }
 
-        let fd = this.machine.fds.insert_fd(Box::new(Epoll::default()));
+        let fd = this.machine.fds.insert_fd(Epoll::default());
         Ok(Scalar::from_i32(fd))
     }
 
@@ -89,11 +83,11 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
     /// <https://linux.die.net/man/2/epoll_ctl>
     fn epoll_ctl(
         &mut self,
-        epfd: &OpTy<'tcx, Provenance>,
-        op: &OpTy<'tcx, Provenance>,
-        fd: &OpTy<'tcx, Provenance>,
-        event: &OpTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+        epfd: &OpTy<'tcx>,
+        op: &OpTy<'tcx>,
+        fd: &OpTy<'tcx>,
+        event: &OpTy<'tcx>,
+    ) -> InterpResult<'tcx, Scalar> {
         let this = self.eval_context_mut();
 
         let epfd = this.read_scalar(epfd)?.to_i32()?;
@@ -114,27 +108,25 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
             let data = this.read_scalar(&data)?;
             let event = EpollEvent { events, data };
 
-            if let Some(epfd) = this.machine.fds.get_mut(epfd) {
-                let epfd = epfd
-                    .downcast_mut::<Epoll>()
-                    .ok_or_else(|| err_unsup_format!("non-epoll FD passed to `epoll_ctl`"))?;
+            let Some(mut epfd) = this.machine.fds.get_mut(epfd) else {
+                return Ok(Scalar::from_i32(this.fd_not_found()?));
+            };
+            let epfd = epfd
+                .downcast_mut::<Epoll>()
+                .ok_or_else(|| err_unsup_format!("non-epoll FD passed to `epoll_ctl`"))?;
 
-                epfd.file_descriptors.insert(fd, event);
-                Ok(Scalar::from_i32(0))
-            } else {
-                Ok(Scalar::from_i32(this.fd_not_found()?))
-            }
+            epfd.file_descriptors.insert(fd, event);
+            Ok(Scalar::from_i32(0))
         } else if op == epoll_ctl_del {
-            if let Some(epfd) = this.machine.fds.get_mut(epfd) {
-                let epfd = epfd
-                    .downcast_mut::<Epoll>()
-                    .ok_or_else(|| err_unsup_format!("non-epoll FD passed to `epoll_ctl`"))?;
+            let Some(mut epfd) = this.machine.fds.get_mut(epfd) else {
+                return Ok(Scalar::from_i32(this.fd_not_found()?));
+            };
+            let epfd = epfd
+                .downcast_mut::<Epoll>()
+                .ok_or_else(|| err_unsup_format!("non-epoll FD passed to `epoll_ctl`"))?;
 
-                epfd.file_descriptors.remove(&fd);
-                Ok(Scalar::from_i32(0))
-            } else {
-                Ok(Scalar::from_i32(this.fd_not_found()?))
-            }
+            epfd.file_descriptors.remove(&fd);
+            Ok(Scalar::from_i32(0))
         } else {
             let einval = this.eval_libc("EINVAL");
             this.set_last_error(einval)?;
@@ -173,11 +165,11 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
     /// <https://man7.org/linux/man-pages/man2/epoll_wait.2.html>
     fn epoll_wait(
         &mut self,
-        epfd: &OpTy<'tcx, Provenance>,
-        events: &OpTy<'tcx, Provenance>,
-        maxevents: &OpTy<'tcx, Provenance>,
-        timeout: &OpTy<'tcx, Provenance>,
-    ) -> InterpResult<'tcx, Scalar<Provenance>> {
+        epfd: &OpTy<'tcx>,
+        events: &OpTy<'tcx>,
+        maxevents: &OpTy<'tcx>,
+        timeout: &OpTy<'tcx>,
+    ) -> InterpResult<'tcx, Scalar> {
         let this = self.eval_context_mut();
 
         let epfd = this.read_scalar(epfd)?.to_i32()?;
@@ -185,15 +177,14 @@ pub trait EvalContextExt<'mir, 'tcx: 'mir>: crate::MiriInterpCxExt<'mir, 'tcx> {
         let _maxevents = this.read_scalar(maxevents)?.to_i32()?;
         let _timeout = this.read_scalar(timeout)?.to_i32()?;
 
-        if let Some(epfd) = this.machine.fds.get_mut(epfd) {
-            let _epfd = epfd
-                .downcast_mut::<Epoll>()
-                .ok_or_else(|| err_unsup_format!("non-epoll FD passed to `epoll_wait`"))?;
+        let Some(mut epfd) = this.machine.fds.get_mut(epfd) else {
+            return Ok(Scalar::from_i32(this.fd_not_found()?));
+        };
+        let _epfd = epfd
+            .downcast_mut::<Epoll>()
+            .ok_or_else(|| err_unsup_format!("non-epoll FD passed to `epoll_wait`"))?;
 
-            // FIXME return number of events ready when scheme for marking events ready exists
-            throw_unsup_format!("returning ready events from epoll_wait is not yet implemented");
-        } else {
-            Ok(Scalar::from_i32(this.fd_not_found()?))
-        }
+        // FIXME return number of events ready when scheme for marking events ready exists
+        throw_unsup_format!("returning ready events from epoll_wait is not yet implemented");
     }
 }

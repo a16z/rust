@@ -4,9 +4,6 @@ use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
 
-use crate::mir::interpret::ConstAllocation;
-
-use super::graphviz::write_mir_fn_graphviz;
 use rustc_ast::{InlineAsmOptions, InlineAsmTemplatePiece};
 use rustc_middle::mir::interpret::{
     alloc_range, read_target_uint, AllocBytes, AllocId, Allocation, GlobalAlloc, Pointer,
@@ -15,6 +12,10 @@ use rustc_middle::mir::interpret::{
 use rustc_middle::mir::visit::Visitor;
 use rustc_middle::mir::*;
 use rustc_target::abi::Size;
+use tracing::trace;
+
+use super::graphviz::write_mir_fn_graphviz;
+use crate::mir::interpret::ConstAllocation;
 
 const INDENT: &str = "    ";
 /// Alignment for lining up comments following MIR statements
@@ -176,7 +177,18 @@ fn dump_path<'tcx>(
     // All drop shims have the same DefId, so we have to add the type
     // to get unique file names.
     let shim_disambiguator = match source.instance {
-        ty::InstanceDef::DropGlue(_, Some(ty)) => {
+        ty::InstanceKind::DropGlue(_, Some(ty)) => {
+            // Unfortunately, pretty-printed typed are not very filename-friendly.
+            // We dome some filtering.
+            let mut s = ".".to_owned();
+            s.extend(ty.to_string().chars().filter_map(|c| match c {
+                ' ' => None,
+                ':' | '<' | '>' => Some('_'),
+                c => Some(c),
+            }));
+            s
+        }
+        ty::InstanceKind::AsyncDropGlueCtorShim(_, Some(ty)) => {
             // Unfortunately, pretty-printed typed are not very filename-friendly.
             // We dome some filtering.
             let mut s = ".".to_owned();
@@ -268,7 +280,7 @@ pub fn write_mir_pretty<'tcx>(
             // are shared between mir_for_ctfe and optimized_mir
             write_mir_fn(tcx, tcx.mir_for_ctfe(def_id), &mut |_, _| Ok(()), w)?;
         } else {
-            let instance_mir = tcx.instance_mir(ty::InstanceDef::Item(def_id));
+            let instance_mir = tcx.instance_mir(ty::InstanceKind::Item(def_id));
             render_body(w, instance_mir)?;
         }
     }
@@ -461,8 +473,8 @@ pub fn write_mir_intro<'tcx>(
     // Add an empty line before the first block is printed.
     writeln!(w)?;
 
-    if let Some(branch_info) = &body.coverage_branch_info {
-        write_coverage_branch_info(branch_info, w)?;
+    if let Some(coverage_info_hi) = &body.coverage_info_hi {
+        write_coverage_info_hi(coverage_info_hi, w)?;
     }
     if let Some(function_coverage_info) = &body.function_coverage_info {
         write_function_coverage_info(function_coverage_info, w)?;
@@ -471,19 +483,55 @@ pub fn write_mir_intro<'tcx>(
     Ok(())
 }
 
-fn write_coverage_branch_info(
-    branch_info: &coverage::BranchInfo,
+fn write_coverage_info_hi(
+    coverage_info_hi: &coverage::CoverageInfoHi,
     w: &mut dyn io::Write,
 ) -> io::Result<()> {
-    let coverage::BranchInfo { branch_spans, .. } = branch_info;
+    let coverage::CoverageInfoHi {
+        num_block_markers: _,
+        branch_spans,
+        mcdc_branch_spans,
+        mcdc_decision_spans,
+    } = coverage_info_hi;
+
+    // Only add an extra trailing newline if we printed at least one thing.
+    let mut did_print = false;
 
     for coverage::BranchSpan { span, true_marker, false_marker } in branch_spans {
         writeln!(
             w,
             "{INDENT}coverage branch {{ true: {true_marker:?}, false: {false_marker:?} }} => {span:?}",
         )?;
+        did_print = true;
     }
-    if !branch_spans.is_empty() {
+
+    for coverage::MCDCBranchSpan {
+        span,
+        condition_info,
+        true_marker,
+        false_marker,
+        decision_depth,
+    } in mcdc_branch_spans
+    {
+        writeln!(
+            w,
+            "{INDENT}coverage mcdc branch {{ condition_id: {:?}, true: {true_marker:?}, false: {false_marker:?}, depth: {decision_depth:?} }} => {span:?}",
+            condition_info.map(|info| info.condition_id)
+        )?;
+        did_print = true;
+    }
+
+    for coverage::MCDCDecisionSpan { span, num_conditions, end_markers, decision_depth } in
+        mcdc_decision_spans
+    {
+        writeln!(
+            w,
+            "{INDENT}coverage mcdc decision {{ num_conditions: {num_conditions:?}, end: {end_markers:?}, depth: {decision_depth:?} }} => {span:?}"
+        )?;
+        did_print = true;
+    }
+
+    if did_print {
         writeln!(w)?;
     }
 
@@ -520,10 +568,10 @@ fn write_mir_sig(tcx: TyCtxt<'_>, body: &Body<'_>, w: &mut dyn io::Write) -> io:
     match (kind, body.source.promoted) {
         (_, Some(_)) => write!(w, "const ")?, // promoteds are the closest to consts
         (DefKind::Const | DefKind::AssocConst, _) => write!(w, "const ")?,
-        (DefKind::Static { mutability: hir::Mutability::Not, nested: false }, _) => {
+        (DefKind::Static { safety: _, mutability: hir::Mutability::Not, nested: false }, _) => {
             write!(w, "static ")?
         }
-        (DefKind::Static { mutability: hir::Mutability::Mut, nested: false }, _) => {
+        (DefKind::Static { safety: _, mutability: hir::Mutability::Mut, nested: false }, _) => {
             write!(w, "static mut ")?
         }
         (_, _) if is_function => write!(w, "fn ")?,
@@ -806,6 +854,16 @@ impl<'tcx> TerminatorKind<'tcx> {
                 }
                 write!(fmt, ")")
             }
+            TailCall { func, args, .. } => {
+                write!(fmt, "tailcall {func:?}(")?;
+                for (index, arg) in args.iter().enumerate() {
+                    if index > 0 {
+                        write!(fmt, ", ")?;
+                    }
+                    write!(fmt, "{:?}", arg)?;
+                }
+                write!(fmt, ")")
+            }
             Assert { cond, expected, msg, .. } => {
                 write!(fmt, "assert(")?;
                 if !expected {
@@ -873,7 +931,12 @@ impl<'tcx> TerminatorKind<'tcx> {
     pub fn fmt_successor_labels(&self) -> Vec<Cow<'static, str>> {
         use self::TerminatorKind::*;
         match *self {
-            Return | UnwindResume | UnwindTerminate(_) | Unreachable | CoroutineDrop => vec![],
+            Return
+            | TailCall { .. }
+            | UnwindResume
+            | UnwindTerminate(_)
+            | Unreachable
+            | CoroutineDrop => vec![],
             Goto { .. } => vec!["".into()],
             SwitchInt { ref targets, .. } => targets
                 .values
@@ -933,9 +996,6 @@ impl<'tcx> Debug for Rvalue<'tcx> {
                 with_no_trimmed_paths!(write!(fmt, "{place:?} as {ty} ({kind:?})"))
             }
             BinaryOp(ref op, box (ref a, ref b)) => write!(fmt, "{op:?}({a:?}, {b:?})"),
-            CheckedBinaryOp(ref op, box (ref a, ref b)) => {
-                write!(fmt, "Checked{op:?}({a:?}, {b:?})")
-            }
             UnaryOp(ref op, ref a) => write!(fmt, "{op:?}({a:?})"),
             Discriminant(ref place) => write!(fmt, "discriminant({place:?})"),
             NullaryOp(ref op, ref t) => {
@@ -954,7 +1014,8 @@ impl<'tcx> Debug for Rvalue<'tcx> {
             Ref(region, borrow_kind, ref place) => {
                 let kind_str = match borrow_kind {
                     BorrowKind::Shared => "",
-                    BorrowKind::Fake => "fake ",
+                    BorrowKind::Fake(FakeBorrowKind::Deep) => "fake ",
+                    BorrowKind::Fake(FakeBorrowKind::Shallow) => "fake shallow ",
                     BorrowKind::Mut { .. } => "mut ",
                 };
 
@@ -978,12 +1039,7 @@ impl<'tcx> Debug for Rvalue<'tcx> {
             CopyForDeref(ref place) => write!(fmt, "deref_copy {place:#?}"),
 
             AddressOf(mutability, ref place) => {
-                let kind_str = match mutability {
-                    Mutability::Mut => "mut",
-                    Mutability::Not => "const",
-                };
-
-                write!(fmt, "&raw {kind_str} {place:?}")
+                write!(fmt, "&raw {mut_str} {place:?}", mut_str = mutability.ptr_str())
             }
 
             Aggregate(ref kind, ref places) => {
@@ -1079,6 +1135,15 @@ impl<'tcx> Debug for Rvalue<'tcx> {
 
                         struct_fmt.finish()
                     }),
+
+                    AggregateKind::RawPtr(pointee_ty, mutability) => {
+                        let kind_str = match mutability {
+                            Mutability::Mut => "mut",
+                            Mutability::Not => "const",
+                        };
+                        with_no_trimmed_paths!(write!(fmt, "*{kind_str} {pointee_ty} from "))?;
+                        fmt_tuple(fmt, "")
+                    }
                 }
             }
 
@@ -1246,7 +1311,7 @@ fn use_verbose(ty: Ty<'_>, fn_def: bool) -> bool {
 }
 
 impl<'tcx> Visitor<'tcx> for ExtraComments<'tcx> {
-    fn visit_constant(&mut self, constant: &ConstOperand<'tcx>, _location: Location) {
+    fn visit_const_operand(&mut self, constant: &ConstOperand<'tcx>, _location: Location) {
         let ConstOperand { span, user_ty, const_ } = constant;
         if use_verbose(const_.ty(), true) {
             self.push("mir::ConstOperand");
@@ -1272,12 +1337,12 @@ impl<'tcx> Visitor<'tcx> for ExtraComments<'tcx> {
             };
 
             let val = match const_ {
-                Const::Ty(ct) => match ct.kind() {
+                Const::Ty(_, ct) => match ct.kind() {
                     ty::ConstKind::Param(p) => format!("ty::Param({p})"),
                     ty::ConstKind::Unevaluated(uv) => {
                         format!("ty::Unevaluated({}, {:?})", self.tcx.def_path_str(uv.def), uv.args,)
                     }
-                    ty::ConstKind::Value(val) => format!("ty::Valtree({})", fmt_valtree(&val)),
+                    ty::ConstKind::Value(_, val) => format!("ty::Valtree({})", fmt_valtree(&val)),
                     // No `ty::` prefix since we also use this to represent errors from `mir::Unevaluated`.
                     ty::ConstKind::Error(_) => "Error".to_string(),
                     // These variants shouldn't exist in the MIR.
@@ -1374,9 +1439,9 @@ pub fn write_allocations<'tcx>(
     struct CollectAllocIds(BTreeSet<AllocId>);
 
     impl<'tcx> Visitor<'tcx> for CollectAllocIds {
-        fn visit_constant(&mut self, c: &ConstOperand<'tcx>, _: Location) {
+        fn visit_const_operand(&mut self, c: &ConstOperand<'tcx>, _: Location) {
             match c.const_ {
-                Const::Ty(_) | Const::Unevaluated(..) => {}
+                Const::Ty(_, _) | Const::Unevaluated(..) => {}
                 Const::Val(val, _) => {
                     self.0.extend(alloc_ids_from_const_val(val));
                 }
@@ -1408,7 +1473,7 @@ pub fn write_allocations<'tcx>(
             // This can't really happen unless there are bugs, but it doesn't cost us anything to
             // gracefully handle it and allow buggy rustc to be debugged via allocation printing.
             None => write!(w, " (deallocated)")?,
-            Some(GlobalAlloc::Function(inst)) => write!(w, " (fn: {inst})")?,
+            Some(GlobalAlloc::Function { instance, .. }) => write!(w, " (fn: {instance})")?,
             Some(GlobalAlloc::VTable(ty, Some(trait_ref))) => {
                 write!(w, " (vtable: impl {trait_ref} for {ty})")?
             }
@@ -1479,6 +1544,9 @@ impl<'a, 'tcx, Prov: Provenance, Extra, Bytes: AllocBytes> std::fmt::Display
         if alloc.size() == Size::ZERO {
             // We are done.
             return write!(w, " {{}}");
+        }
+        if tcx.sess.opts.unstable_opts.dump_mir_exclude_alloc_bytes {
+            return write!(w, " {{ .. }}");
         }
         // Write allocation bytes.
         writeln!(w, " {{")?;

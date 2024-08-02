@@ -1,5 +1,12 @@
 #![deny(unused_must_use)]
 
+use proc_macro2::TokenStream;
+use quote::{format_ident, quote};
+use syn::spanned::Spanned;
+use syn::{Attribute, Meta, MetaList, Path};
+use synstructure::{BindingInfo, Structure, VariantInfo};
+
+use super::utils::SubdiagnosticVariant;
 use crate::diagnostics::error::{
     invalid_attr, span_err, throw_invalid_attr, throw_span_err, DiagnosticDeriveError,
 };
@@ -9,12 +16,6 @@ use crate::diagnostics::utils::{
     should_generate_arg, AllowMultipleAlternatives, FieldInfo, FieldInnerTy, FieldMap, HasFieldMap,
     SetOnce, SpannedOption, SubdiagnosticKind,
 };
-use proc_macro2::TokenStream;
-use quote::{format_ident, quote};
-use syn::{spanned::Spanned, Attribute, Meta, MetaList, Path};
-use synstructure::{BindingInfo, Structure, VariantInfo};
-
-use super::utils::SubdiagnosticVariant;
 
 /// The central struct for constructing the `add_to_diag` method from an annotated struct.
 pub(crate) struct SubdiagnosticDerive {
@@ -71,6 +72,7 @@ impl SubdiagnosticDerive {
                     span_field: None,
                     applicability: None,
                     has_suggestion_parts: false,
+                    has_subdiagnostic: false,
                     is_enum,
                 };
                 builder.into_tokens().unwrap_or_else(|v| v.to_compile_error())
@@ -85,12 +87,15 @@ impl SubdiagnosticDerive {
 
         let diag = &self.diag;
         let f = &self.f;
+
+        // FIXME(edition_2024): Fix the `keyword_idents_2024` lint to not trigger here?
+        #[allow(keyword_idents_2024)]
         let ret = structure.gen_impl(quote! {
             gen impl rustc_errors::Subdiagnostic for @Self {
                 fn add_to_diag_with<__G, __F>(
                     self,
                     #diag: &mut rustc_errors::Diag<'_, __G>,
-                    #f: __F
+                    #f: &__F
                 ) where
                     __G: rustc_errors::EmissionGuarantee,
                     __F: rustc_errors::SubdiagMessageOp<__G>,
@@ -99,6 +104,7 @@ impl SubdiagnosticDerive {
                 }
             }
         });
+
         ret
     }
 }
@@ -132,6 +138,10 @@ struct SubdiagnosticDeriveVariantBuilder<'parent, 'a> {
     /// Set to true when a `#[suggestion_part]` field is encountered, used to generate an error
     /// during finalization if still `false`.
     has_suggestion_parts: bool,
+
+    /// Set to true when a `#[subdiagnostic]` field is encountered, used to suppress the error
+    /// emitted when no subdiagnostic kinds are specified on the variant itself.
+    has_subdiagnostic: bool,
 
     /// Set to true when this variant is an enum variant rather than just the body of a struct.
     is_enum: bool,
@@ -373,6 +383,13 @@ impl<'parent, 'a> SubdiagnosticDeriveVariantBuilder<'parent, 'a> {
 
                 Ok(quote! {})
             }
+            "subdiagnostic" => {
+                let f = &self.parent.f;
+                let diag = &self.parent.diag;
+                let binding = &info.binding;
+                self.has_subdiagnostic = true;
+                Ok(quote! { #binding.add_to_diag_with(#diag, #f); })
+            }
             _ => {
                 let mut span_attrs = vec![];
                 if kind_stats.has_multipart_suggestion {
@@ -480,18 +497,6 @@ impl<'parent, 'a> SubdiagnosticDeriveVariantBuilder<'parent, 'a> {
 
     pub(crate) fn into_tokens(&mut self) -> Result<TokenStream, DiagnosticDeriveError> {
         let kind_slugs = self.identify_kind()?;
-        if kind_slugs.is_empty() {
-            if self.is_enum {
-                // It's okay for a variant to not be a subdiagnostic at all..
-                return Ok(quote! {});
-            } else {
-                // ..but structs should always be _something_.
-                throw_span_err!(
-                    self.variant.ast().ident.span().unwrap(),
-                    "subdiagnostic kind not specified"
-                );
-            }
-        };
 
         let kind_stats: KindsStatistics =
             kind_slugs.iter().map(|(kind, _slug, _no_span)| kind).collect();
@@ -509,6 +514,19 @@ impl<'parent, 'a> SubdiagnosticDeriveVariantBuilder<'parent, 'a> {
             .filter(|binding| !should_generate_arg(binding.ast()))
             .map(|binding| self.generate_field_attr_code(binding, kind_stats))
             .collect();
+
+        if kind_slugs.is_empty() && !self.has_subdiagnostic {
+            if self.is_enum {
+                // It's okay for a variant to not be a subdiagnostic at all..
+                return Ok(quote! {});
+            } else {
+                // ..but structs should always be _something_.
+                throw_span_err!(
+                    self.variant.ast().ident.span().unwrap(),
+                    "subdiagnostic kind not specified"
+                );
+            }
+        };
 
         let span_field = self.span_field.value_ref();
 

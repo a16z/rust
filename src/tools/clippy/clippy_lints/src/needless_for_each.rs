@@ -1,9 +1,9 @@
 use rustc_errors::Applicability;
 use rustc_hir::intravisit::{walk_expr, Visitor};
-use rustc_hir::{Closure, Expr, ExprKind, Stmt, StmtKind};
+use rustc_hir::{Block, BlockCheckMode, Closure, Expr, ExprKind, Stmt, StmtKind};
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_session::declare_lint_pass;
-use rustc_span::{sym, Span, Symbol};
+use rustc_span::{sym, Span};
 
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::is_trait_method;
@@ -25,16 +25,26 @@ declare_clippy_lint! {
     /// ```no_run
     /// let v = vec![0, 1, 2];
     /// v.iter().for_each(|elem| {
-    ///     println!("{}", elem);
+    ///     println!("{elem}");
     /// })
     /// ```
     /// Use instead:
     /// ```no_run
     /// let v = vec![0, 1, 2];
-    /// for elem in v.iter() {
-    ///     println!("{}", elem);
+    /// for elem in &v {
+    ///     println!("{elem}");
     /// }
     /// ```
+    ///
+    /// ### Known Problems
+    /// When doing things such as:
+    /// ```ignore
+    /// let v = vec![0, 1, 2];
+    /// v.iter().for_each(|elem| unsafe {
+    ///     libc::printf(c"%d\n".as_ptr(), elem);
+    /// });
+    /// ```
+    /// This lint will not trigger.
     #[clippy::version = "1.53.0"]
     pub NEEDLESS_FOR_EACH,
     pedantic,
@@ -45,16 +55,8 @@ declare_lint_pass!(NeedlessForEach => [NEEDLESS_FOR_EACH]);
 
 impl<'tcx> LateLintPass<'tcx> for NeedlessForEach {
     fn check_stmt(&mut self, cx: &LateContext<'tcx>, stmt: &'tcx Stmt<'_>) {
-        let (StmtKind::Expr(expr) | StmtKind::Semi(expr)) = stmt.kind else {
-            return;
-        };
-
-        if let ExprKind::MethodCall(method_name, for_each_recv, [for_each_arg], _) = expr.kind
-            // Check the method name is `for_each`.
-            && method_name.ident.name == Symbol::intern("for_each")
-            // Check `for_each` is an associated function of `Iterator`.
-            && is_trait_method(cx, expr, sym::Iterator)
-            // Checks the receiver of `for_each` is also a method call.
+        if let StmtKind::Expr(expr) | StmtKind::Semi(expr) = stmt.kind
+            && let ExprKind::MethodCall(method_name, for_each_recv, [for_each_arg], _) = expr.kind
             && let ExprKind::MethodCall(_, iter_recv, [], _) = for_each_recv.kind
             // Skip the lint if the call chain is too long. e.g. `v.field.iter().for_each()` or
             // `v.foo().iter().for_each()` must be skipped.
@@ -62,13 +64,17 @@ impl<'tcx> LateLintPass<'tcx> for NeedlessForEach {
                 iter_recv.kind,
                 ExprKind::Array(..) | ExprKind::Call(..) | ExprKind::Path(..)
             )
+            && method_name.ident.name.as_str() == "for_each"
+            && is_trait_method(cx, expr, sym::Iterator)
             // Checks the type of the `iter` method receiver is NOT a user defined type.
             && has_iter_method(cx, cx.typeck_results().expr_ty(iter_recv)).is_some()
             // Skip the lint if the body is not block because this is simpler than `for` loop.
             // e.g. `v.iter().for_each(f)` is simpler and clearer than using `for` loop.
             && let ExprKind::Closure(&Closure { body, .. }) = for_each_arg.kind
             && let body = cx.tcx.hir().body(body)
-            && let ExprKind::Block(..) = body.value.kind
+            // Skip the lint if the body is not safe, so as not to suggest `for … in … unsafe {}`
+            // and suggesting `for … in … { unsafe { } }` is a little ugly.
+            && let ExprKind::Block(Block { rules: BlockCheckMode::DefaultBlock, .. }, ..) = body.value.kind
         {
             let mut ret_collector = RetCollector::default();
             ret_collector.visit_expr(body.value);

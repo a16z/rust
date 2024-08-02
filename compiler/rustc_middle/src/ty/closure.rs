@@ -1,21 +1,22 @@
-use crate::hir::place::{
-    Place as HirPlace, PlaceBase as HirPlaceBase, ProjectionKind as HirProjectionKind,
-};
-use crate::{mir, ty};
-
 use std::fmt::Write;
 
-use crate::query::Providers;
+use rustc_data_structures::captures::Captures;
 use rustc_data_structures::fx::FxIndexMap;
 use rustc_hir as hir;
 use rustc_hir::def_id::LocalDefId;
+use rustc_hir::HirId;
+use rustc_macros::{HashStable, TyDecodable, TyEncodable, TypeFoldable, TypeVisitable};
 use rustc_span::def_id::LocalDefIdMap;
 use rustc_span::symbol::Ident;
 use rustc_span::{Span, Symbol};
 
-use super::TyCtxt;
-
 use self::BorrowKind::*;
+use super::TyCtxt;
+use crate::hir::place::{
+    Place as HirPlace, PlaceBase as HirPlaceBase, ProjectionKind as HirProjectionKind,
+};
+use crate::query::Providers;
+use crate::{mir, ty};
 
 /// Captures are represented using fields inside a structure.
 /// This represents accessing self in the closure structure
@@ -24,7 +25,7 @@ pub const CAPTURE_STRUCT_LOCAL: mir::Local = mir::Local::from_u32(1);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, TyEncodable, TyDecodable, HashStable)]
 #[derive(TypeFoldable, TypeVisitable)]
 pub struct UpvarPath {
-    pub hir_id: hir::HirId,
+    pub hir_id: HirId,
 }
 
 /// Upvars do not get their own `NodeId`. Instead, we use the pair of
@@ -38,7 +39,7 @@ pub struct UpvarId {
 }
 
 impl UpvarId {
-    pub fn new(var_hir_id: hir::HirId, closure_def_id: LocalDefId) -> UpvarId {
+    pub fn new(var_hir_id: HirId, closure_def_id: LocalDefId) -> UpvarId {
         UpvarId { var_path: UpvarPath { hir_id: var_hir_id }, closure_expr_id: closure_def_id }
     }
 }
@@ -67,7 +68,7 @@ pub type MinCaptureInformationMap<'tcx> = LocalDefIdMap<RootVariableMinCaptureLi
 ///
 /// This provides a convenient and quick way of checking if a variable being used within
 /// a closure is a capture of a local variable.
-pub type RootVariableMinCaptureList<'tcx> = FxIndexMap<hir::HirId, MinCaptureList<'tcx>>;
+pub type RootVariableMinCaptureList<'tcx> = FxIndexMap<HirId, MinCaptureList<'tcx>>;
 
 /// Part of `MinCaptureInformationMap`; List of `CapturePlace`s.
 pub type MinCaptureList<'tcx> = Vec<CapturedPlace<'tcx>>;
@@ -134,7 +135,7 @@ impl<'tcx> CapturedPlace<'tcx> {
 
     /// Returns the hir-id of the root variable for the captured place.
     /// e.g., if `a.b.c` was captured, would return the hir-id for `a`.
-    pub fn get_root_variable(&self) -> hir::HirId {
+    pub fn get_root_variable(&self) -> HirId {
         match self.place.base {
             HirPlaceBase::Upvar(upvar_id) => upvar_id.var_path.hir_id,
             base => bug!("Expected upvar, found={:?}", base),
@@ -234,7 +235,7 @@ impl<'tcx> TyCtxt<'tcx> {
 /// Eg: 1. `foo.x` which is represented using `projections=[Field(x)]` is an ancestor of
 ///        `foo.x.y` which is represented using `projections=[Field(x), Field(y)]`.
 ///        Note both `foo.x` and `foo.x.y` start off of the same root variable `foo`.
-///     2. Since we only look at the projections here function will return `bar.x` as an a valid
+///     2. Since we only look at the projections here function will return `bar.x` as a valid
 ///        ancestor of `foo.x.y`. It's the caller's responsibility to ensure that both projections
 ///        list are being applied to the same root variable.
 pub fn is_ancestor_or_same_capture(
@@ -285,12 +286,12 @@ pub struct CaptureInfo {
     ///
     /// In this example, if `capture_disjoint_fields` is **not** set, then x will be captured,
     /// but we won't see it being used during capture analysis, since it's essentially a discard.
-    pub capture_kind_expr_id: Option<hir::HirId>,
+    pub capture_kind_expr_id: Option<HirId>,
     /// Expr Id pointing to use that resulted the corresponding place being captured
     ///
     /// See `capture_kind_expr_id` for example.
     ///
-    pub path_expr_id: Option<hir::HirId>,
+    pub path_expr_id: Option<HirId>,
 
     /// Capture mode that was selected
     pub capture_kind: UpvarCapture,
@@ -413,6 +414,76 @@ impl BorrowKind {
             UniqueImmBorrow => hir::Mutability::Mut,
         }
     }
+}
+
+pub fn analyze_coroutine_closure_captures<'a, 'tcx: 'a, T>(
+    parent_captures: impl IntoIterator<Item = &'a CapturedPlace<'tcx>>,
+    child_captures: impl IntoIterator<Item = &'a CapturedPlace<'tcx>>,
+    mut for_each: impl FnMut((usize, &'a CapturedPlace<'tcx>), (usize, &'a CapturedPlace<'tcx>)) -> T,
+) -> impl Iterator<Item = T> + Captures<'a> + Captures<'tcx> {
+    std::iter::from_coroutine(
+        #[coroutine]
+        move || {
+            let mut child_captures = child_captures.into_iter().enumerate().peekable();
+
+            // One parent capture may correspond to several child captures if we end up
+            // refining the set of captures via edition-2021 precise captures. We want to
+            // match up any number of child captures with one parent capture, so we keep
+            // peeking off this `Peekable` until the child doesn't match anymore.
+            for (parent_field_idx, parent_capture) in parent_captures.into_iter().enumerate() {
+                // Make sure we use every field at least once, b/c why are we capturing something
+                // if it's not used in the inner coroutine.
+                let mut field_used_at_least_once = false;
+
+                // A parent matches a child if they share the same prefix of projections.
+                // The child may have more, if it is capturing sub-fields out of
+                // something that is captured by-move in the parent closure.
+                while child_captures.peek().map_or(false, |(_, child_capture)| {
+                    child_prefix_matches_parent_projections(parent_capture, child_capture)
+                }) {
+                    let (child_field_idx, child_capture) = child_captures.next().unwrap();
+                    // This analysis only makes sense if the parent capture is a
+                    // prefix of the child capture.
+                    assert!(
+                        child_capture.place.projections.len()
+                            >= parent_capture.place.projections.len(),
+                        "parent capture ({parent_capture:#?}) expected to be prefix of \
+                    child capture ({child_capture:#?})"
+                    );
+
+                    yield for_each(
+                        (parent_field_idx, parent_capture),
+                        (child_field_idx, child_capture),
+                    );
+
+                    field_used_at_least_once = true;
+                }
+
+                // Make sure the field was used at least once.
+                assert!(
+                    field_used_at_least_once,
+                    "we captured {parent_capture:#?} but it was not used in the child coroutine?"
+                );
+            }
+            assert_eq!(child_captures.next(), None, "leftover child captures?");
+        },
+    )
+}
+
+fn child_prefix_matches_parent_projections(
+    parent_capture: &ty::CapturedPlace<'_>,
+    child_capture: &ty::CapturedPlace<'_>,
+) -> bool {
+    let HirPlaceBase::Upvar(parent_base) = parent_capture.place.base else {
+        bug!("expected capture to be an upvar");
+    };
+    let HirPlaceBase::Upvar(child_base) = child_capture.place.base else {
+        bug!("expected capture to be an upvar");
+    };
+
+    parent_base.var_path.hir_id == child_base.var_path.hir_id
+        && std::iter::zip(&child_capture.place.projections, &parent_capture.place.projections)
+            .all(|(child, parent)| child.kind == parent.kind)
 }
 
 pub fn provide(providers: &mut Providers) {

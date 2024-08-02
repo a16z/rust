@@ -8,8 +8,7 @@ pub struct System;
 #[cfg(any(windows, unix, target_os = "redox"))]
 mod realloc_fallback {
     use core::alloc::{GlobalAlloc, Layout};
-    use core::cmp;
-    use core::ptr;
+    use core::{cmp, ptr};
     impl super::System {
         pub(crate) unsafe fn realloc_fallback(
             &self,
@@ -34,6 +33,7 @@ mod platform {
     use core::alloc::{GlobalAlloc, Layout};
     use core::ffi::c_void;
     use core::ptr;
+
     use System;
     extern "C" {
         fn posix_memalign(memptr: *mut *mut c_void, align: usize, size: usize) -> i32;
@@ -71,6 +71,7 @@ mod platform {
 #[allow(nonstandard_style)]
 mod platform {
     use core::alloc::{GlobalAlloc, Layout};
+
     use System;
     type LPVOID = *mut u8;
     type HANDLE = LPVOID;
@@ -80,7 +81,6 @@ mod platform {
     extern "system" {
         fn GetProcessHeap() -> HANDLE;
         fn HeapAlloc(hHeap: HANDLE, dwFlags: DWORD, dwBytes: SIZE_T) -> LPVOID;
-        fn HeapReAlloc(hHeap: HANDLE, dwFlags: DWORD, lpMem: LPVOID, dwBytes: SIZE_T) -> LPVOID;
         fn HeapFree(hHeap: HANDLE, dwFlags: DWORD, lpMem: LPVOID) -> BOOL;
         fn GetLastError() -> DWORD;
     }
@@ -111,7 +111,7 @@ mod platform {
             allocate_with_flags(layout, HEAP_ZERO_MEMORY)
         }
         #[inline]
-        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe fn dealloc(&self, ptr: *mut u8, _layout: Layout) {
             let header = get_header(ptr);
             let err = HeapFree(GetProcessHeap(), 0, header.0 as LPVOID);
             debug_assert!(err != 0, "Failed to free heap memory: {}", GetLastError());

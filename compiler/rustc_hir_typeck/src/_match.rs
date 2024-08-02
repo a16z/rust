@@ -1,16 +1,16 @@
-use crate::coercion::{AsCoercionSite, CoerceMany};
-use crate::{Diverges, Expectation, FnCtxt, Needs};
 use rustc_errors::{Applicability, Diag};
 use rustc_hir::def::{CtorOf, DefKind, Res};
 use rustc_hir::def_id::LocalDefId;
 use rustc_hir::{self as hir, ExprKind, PatKind};
 use rustc_hir_pretty::ty_to_string;
-use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc_middle::ty::{self, Ty};
 use rustc_span::Span;
 use rustc_trait_selection::traits::{
     IfExpressionCause, MatchExpressionArmCause, ObligationCause, ObligationCauseCode,
 };
+
+use crate::coercion::{AsCoercionSite, CoerceMany};
+use crate::{Diverges, Expectation, FnCtxt, Needs};
 
 impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
     #[instrument(skip(self), level = "debug", ret)]
@@ -66,11 +66,8 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 // us to give better error messages (pointing to a usually better
                 // arm for inconsistent arms or to the whole match when a `()` type
                 // is required).
-                Expectation::ExpectHasType(ety) if ety != Ty::new_unit(self.tcx) => ety,
-                _ => self.next_ty_var(TypeVariableOrigin {
-                    kind: TypeVariableOriginKind::MiscVariable,
-                    span: expr.span,
-                }),
+                Expectation::ExpectHasType(ety) if ety != tcx.types.unit => ety,
+                _ => self.next_ty_var(expr.span),
             };
             CoerceMany::with_coercion_sites(coerce_first, arms)
         };
@@ -211,10 +208,9 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
         let hir = self.tcx.hir();
 
         // First, check that we're actually in the tail of a function.
-        let Some(body_id) = hir.maybe_body_owned_by(self.body_id) else {
+        let Some(body) = hir.maybe_body_owned_by(self.body_id) else {
             return;
         };
-        let body = hir.body(body_id);
         let hir::ExprKind::Block(block, _) = body.value.kind else {
             return;
         };
@@ -239,7 +235,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                 let ret_ty = ret_coercion.borrow().expected_ty();
                 let ret_ty = self.infcx.shallow_resolve(ret_ty);
                 self.can_coerce(arm_ty, ret_ty)
-                    && prior_arm.map_or(true, |(_, ty, _)| self.can_coerce(ty, ret_ty))
+                    && prior_arm.is_none_or(|(_, ty, _)| self.can_coerce(ty, ret_ty))
                     // The match arms need to unify for the case of `impl Trait`.
                     && !matches!(ret_ty.kind(), ty::Alias(ty::Opaque, ..))
             }
@@ -251,7 +247,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
 
         let semi = expr.span.shrink_to_hi().with_hi(semi_span.hi());
         let sugg = crate::errors::RemoveSemiForCoerce { expr: expr.span, ret, semi };
-        diag.subdiagnostic(self.dcx(), sugg);
+        diag.subdiagnostic(sugg);
     }
 
     /// When the previously checked expression (the scrutinee) diverges,
@@ -395,7 +391,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
                     return self.get_fn_decl(hir_id).map(|(_, fn_decl, _)| {
                         let (ty, span) = match fn_decl.output {
                             hir::FnRetTy::DefaultReturn(span) => ("()".to_string(), span),
-                            hir::FnRetTy::Return(ty) => (ty_to_string(ty), ty.span),
+                            hir::FnRetTy::Return(ty) => (ty_to_string(&self.tcx, ty), ty.span),
                         };
                         (span, format!("expected `{ty}` because of this return type"))
                     });
@@ -578,10 +574,7 @@ impl<'a, 'tcx> FnCtxt<'a, 'tcx> {
             // ...but otherwise we want to use any supertype of the
             // scrutinee. This is sort of a workaround, see note (*) in
             // `check_pat` for some details.
-            let scrut_ty = self.next_ty_var(TypeVariableOrigin {
-                kind: TypeVariableOriginKind::TypeInference,
-                span: scrut.span,
-            });
+            let scrut_ty = self.next_ty_var(scrut.span);
             self.check_expr_has_type_or_error(scrut, scrut_ty, |_| {});
             scrut_ty
         }

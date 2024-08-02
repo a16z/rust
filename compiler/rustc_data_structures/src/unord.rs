@@ -2,19 +2,17 @@
 //! ordering. This is a useful property for deterministic computations, such
 //! as required by the query system.
 
-use rustc_hash::{FxHashMap, FxHashSet};
-use std::{
-    borrow::{Borrow, BorrowMut},
-    collections::hash_map::Entry,
-    hash::Hash,
-    iter::{Product, Sum},
-    ops::Index,
-};
+use std::borrow::{Borrow, BorrowMut};
+use std::collections::hash_map::{Entry, OccupiedError};
+use std::hash::Hash;
+use std::iter::{Product, Sum};
+use std::ops::Index;
 
-use crate::{
-    fingerprint::Fingerprint,
-    stable_hasher::{HashStable, StableCompare, StableHasher, ToStableHashKey},
-};
+use rustc_hash::{FxHashMap, FxHashSet};
+use rustc_macros::{Decodable_Generic, Encodable_Generic};
+
+use crate::fingerprint::Fingerprint;
+use crate::stable_hasher::{HashStable, StableCompare, StableHasher, ToStableHashKey};
 
 /// `UnordItems` is the order-less version of `Iterator`. It only contains methods
 /// that don't (easily) expose an ordering of the underlying items.
@@ -466,6 +464,11 @@ impl<K: Eq + Hash, V> UnordMap<K, V> {
     #[inline]
     pub fn insert(&mut self, k: K, v: V) -> Option<V> {
         self.inner.insert(k, v)
+    }
+
+    #[inline]
+    pub fn try_insert(&mut self, k: K, v: V) -> Result<&mut V, OccupiedError<'_, K, V>> {
+        self.inner.try_insert(k, v)
     }
 
     #[inline]

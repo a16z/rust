@@ -1,15 +1,15 @@
 //! base_db defines basic database traits. The concrete DB is defined by ide.
 
-#![warn(rust_2018_idioms, unused_lifetimes)]
-
 mod change;
 mod input;
 
 use std::panic;
 
 use salsa::Durability;
-use syntax::{ast, Parse, SourceFile};
+use span::EditionedFileId;
+use syntax::{ast, Parse, SourceFile, SyntaxError};
 use triomphe::Arc;
+use vfs::FileId;
 
 pub use crate::{
     change::FileChange,
@@ -20,8 +20,7 @@ pub use crate::{
     },
 };
 pub use salsa::{self, Cancelled};
-pub use span::{FilePosition, FileRange};
-pub use vfs::{file_set::FileSet, AnchoredPath, AnchoredPathBuf, FileId, VfsPath};
+pub use vfs::{file_set::FileSet, AnchoredPath, AnchoredPathBuf, VfsPath};
 
 pub use semver::{BuildMetadata, Prerelease, Version, VersionReq};
 
@@ -43,14 +42,15 @@ pub trait Upcast<T: ?Sized> {
     fn upcast(&self) -> &T;
 }
 
-pub const DEFAULT_FILE_TEXT_LRU_CAP: usize = 16;
-pub const DEFAULT_PARSE_LRU_CAP: usize = 128;
-pub const DEFAULT_BORROWCK_LRU_CAP: usize = 1024;
+pub const DEFAULT_FILE_TEXT_LRU_CAP: u16 = 16;
+pub const DEFAULT_PARSE_LRU_CAP: u16 = 128;
+pub const DEFAULT_BORROWCK_LRU_CAP: u16 = 2024;
 
 pub trait FileLoader {
     /// Text of the file.
     fn file_text(&self, file_id: FileId) -> Arc<str>;
     fn resolve_path(&self, path: AnchoredPath<'_>) -> Option<FileId>;
+    /// Crates whose root's source root is the same as the source root of `file_id`
     fn relevant_crates(&self, file_id: FileId) -> Arc<[CrateId]>;
 }
 
@@ -59,7 +59,11 @@ pub trait FileLoader {
 #[salsa::query_group(SourceDatabaseStorage)]
 pub trait SourceDatabase: FileLoader + std::fmt::Debug {
     /// Parses the file into the syntax tree.
-    fn parse(&self, file_id: FileId) -> Parse<ast::SourceFile>;
+    #[salsa::lru]
+    fn parse(&self, file_id: EditionedFileId) -> Parse<ast::SourceFile>;
+
+    /// Returns the set of errors obtained from parsing the file including validation errors.
+    fn parse_errors(&self, file_id: EditionedFileId) -> Option<Arc<[SyntaxError]>>;
 
     /// The crate graph.
     #[salsa::input]
@@ -80,10 +84,19 @@ fn toolchain_channel(db: &dyn SourceDatabase, krate: CrateId) -> Option<ReleaseC
     db.toolchain(krate).as_ref().and_then(|v| ReleaseChannel::from_str(&v.pre))
 }
 
-fn parse(db: &dyn SourceDatabase, file_id: FileId) -> Parse<ast::SourceFile> {
-    let _p = tracing::span!(tracing::Level::INFO, "parse_query", ?file_id).entered();
+fn parse(db: &dyn SourceDatabase, file_id: EditionedFileId) -> Parse<ast::SourceFile> {
+    let _p = tracing::info_span!("parse", ?file_id).entered();
+    let (file_id, edition) = file_id.unpack();
     let text = db.file_text(file_id);
-    SourceFile::parse(&text)
+    SourceFile::parse(&text, edition)
+}
+
+fn parse_errors(db: &dyn SourceDatabase, file_id: EditionedFileId) -> Option<Arc<[SyntaxError]>> {
+    let errors = db.parse(file_id).errors();
+    match &*errors {
+        [] => None,
+        [..] => Some(errors.into()),
+    }
 }
 
 /// We don't want to give HIR knowledge of source roots, hence we extract these
@@ -93,6 +106,7 @@ pub trait SourceDatabaseExt: SourceDatabase {
     #[salsa::input]
     fn compressed_file_text(&self, file_id: FileId) -> Arc<[u8]>;
 
+    #[salsa::lru]
     fn file_text(&self, file_id: FileId) -> Arc<str>;
 
     /// Path to a file, relative to the root of its source root.
@@ -103,6 +117,7 @@ pub trait SourceDatabaseExt: SourceDatabase {
     #[salsa::input]
     fn source_root(&self, id: SourceRootId) -> Arc<SourceRoot>;
 
+    /// Crates whose root fool is in `id`.
     fn source_root_crates(&self, id: SourceRootId) -> Arc<[CrateId]>;
 }
 
@@ -173,7 +188,7 @@ impl<T: SourceDatabaseExt> FileLoader for FileLoaderDelegate<&'_ T> {
     }
 
     fn relevant_crates(&self, file_id: FileId) -> Arc<[CrateId]> {
-        let _p = tracing::span!(tracing::Level::INFO, "relevant_crates").entered();
+        let _p = tracing::info_span!("relevant_crates").entered();
         let source_root = self.0.file_source_root(file_id);
         self.0.source_root_crates(source_root)
     }

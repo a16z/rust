@@ -1,4 +1,5 @@
 use clippy_config::msrvs::{self, Msrv};
+use clippy_config::Conf;
 use clippy_utils::diagnostics::span_lint_and_then;
 use clippy_utils::source::indent_of;
 use clippy_utils::{is_default_equivalent, peel_blocks};
@@ -9,7 +10,7 @@ use rustc_hir::{
 };
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_middle::ty::adjustment::{Adjust, PointerCoercion};
-use rustc_middle::ty::{self, Adt, AdtDef, GenericArgsRef, Ty, TypeckResults};
+use rustc_middle::ty::{self, AdtDef, GenericArgsRef, Ty, TypeckResults};
 use rustc_session::impl_lint_pass;
 use rustc_span::sym;
 
@@ -60,9 +61,10 @@ pub struct DerivableImpls {
 }
 
 impl DerivableImpls {
-    #[must_use]
-    pub fn new(msrv: Msrv) -> Self {
-        DerivableImpls { msrv }
+    pub fn new(conf: &'static Conf) -> Self {
+        DerivableImpls {
+            msrv: conf.msrv.clone(),
+        }
     }
 }
 
@@ -79,7 +81,7 @@ fn is_path_self(e: &Expr<'_>) -> bool {
 fn contains_trait_object(ty: Ty<'_>) -> bool {
     match ty.kind() {
         ty::Ref(_, ty, _) => contains_trait_object(*ty),
-        Adt(def, args) => def.is_box() && args[0].as_type().map_or(false, contains_trait_object),
+        ty::Adt(def, args) => def.is_box() && args[0].as_type().map_or(false, contains_trait_object),
         ty::Dynamic(..) => true,
         _ => false,
     }
@@ -198,7 +200,7 @@ impl<'tcx> LateLintPass<'tcx> for DerivableImpls {
             && let Node::ImplItem(impl_item) = cx.tcx.hir_node(impl_item_hir)
             && let ImplItemKind::Fn(_, b) = &impl_item.kind
             && let Body { value: func_expr, .. } = cx.tcx.hir().body(*b)
-            && let &Adt(adt_def, args) = cx.tcx.type_of(item.owner_id).instantiate_identity().kind()
+            && let &ty::Adt(adt_def, args) = cx.tcx.type_of(item.owner_id).instantiate_identity().kind()
             && let attrs = cx.tcx.hir().attrs(item.hir_id())
             && !attrs.iter().any(|attr| attr.doc_str().is_some())
             && cx.tcx.hir().attrs(impl_item_hir).is_empty()

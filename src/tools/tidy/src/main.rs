@@ -4,16 +4,15 @@
 //! etc. This is run by default on `./x.py test` and as part of the auto
 //! builders. The tidy checks can be executed with `./x.py test tidy`.
 
-use tidy::*;
-
 use std::collections::VecDeque;
-use std::env;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
-use std::process;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, scope, ScopedJoinHandle};
+use std::{env, process};
+
+use tidy::*;
 
 fn main() {
     // Running Cargo will read the libstd Cargo.toml
@@ -35,6 +34,7 @@ fn main() {
     let library_path = root_path.join("library");
     let compiler_path = root_path.join("compiler");
     let librustdoc_path = src_path.join("librustdoc");
+    let crashes_path = tests_path.join("crashes");
 
     let args: Vec<String> = env::args().skip(1).collect();
     let (cfg_args, pos_args) = match args.iter().position(|arg| arg == "--") {
@@ -108,10 +108,13 @@ fn main() {
         check!(mir_opt_tests, &tests_path, bless);
         check!(rustdoc_gui_tests, &tests_path);
         check!(rustdoc_css_themes, &librustdoc_path);
+        check!(known_bug, &crashes_path);
+        check!(unknown_revision, &tests_path);
 
         // Checks that only make sense for the compiler.
         check!(error_codes, &root_path, &[&compiler_path, &librustdoc_path], verbose);
         check!(fluent_alphabetical, &compiler_path, bless);
+        check!(fluent_period, &compiler_path);
         check!(target_policy, &root_path);
 
         // Checks that only make sense for the std libs.

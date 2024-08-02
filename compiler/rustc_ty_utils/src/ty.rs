@@ -3,12 +3,16 @@ use rustc_hir as hir;
 use rustc_hir::def::DefKind;
 use rustc_hir::LangItem;
 use rustc_index::bit_set::BitSet;
+use rustc_middle::bug;
 use rustc_middle::query::Providers;
-use rustc_middle::ty::{self, EarlyBinder, Ty, TyCtxt, TypeVisitableExt, TypeVisitor};
-use rustc_middle::ty::{ToPredicate, TypeSuperVisitable, TypeVisitable};
+use rustc_middle::ty::{
+    self, EarlyBinder, Ty, TyCtxt, TypeSuperVisitable, TypeVisitable, TypeVisitableExt,
+    TypeVisitor, Upcast,
+};
 use rustc_span::def_id::{DefId, LocalDefId, CRATE_DEF_ID};
 use rustc_span::DUMMY_SP;
 use rustc_trait_selection::traits;
+use tracing::{debug, instrument};
 
 #[instrument(level = "debug", skip(tcx), ret)]
 fn sized_constraint_for_ty<'tcx>(tcx: TyCtxt<'tcx>, ty: Ty<'tcx>) -> Option<Ty<'tcx>> {
@@ -75,7 +79,7 @@ fn defaultness(tcx: TyCtxt<'_>, def_id: LocalDefId) -> hir::Defaultness {
 fn adt_sized_constraint<'tcx>(
     tcx: TyCtxt<'tcx>,
     def_id: DefId,
-) -> Option<ty::EarlyBinder<Ty<'tcx>>> {
+) -> Option<ty::EarlyBinder<'tcx, Ty<'tcx>>> {
     if let Some(def_id) = def_id.as_local() {
         if let ty::Representability::Infinite(_) = tcx.representability(def_id) {
             return None;
@@ -91,8 +95,8 @@ fn adt_sized_constraint<'tcx>(
     let tail_ty = tcx.type_of(tail_def.did).instantiate_identity();
 
     let constraint_ty = sized_constraint_for_ty(tcx, tail_ty)?;
-    if constraint_ty.references_error() {
-        return None;
+    if let Err(guar) = constraint_ty.error_reported() {
+        return Some(ty::EarlyBinder::bind(Ty::new_error(tcx, guar)));
     }
 
     // perf hack: if there is a `constraint_ty: Sized` bound, then we know
@@ -214,12 +218,12 @@ impl<'tcx> TypeVisitor<TyCtxt<'tcx>> for ImplTraitInTraitFinder<'_, 'tcx> {
             self.predicates.push(
                 ty::Binder::bind_with_vars(
                     ty::ProjectionPredicate {
-                        projection_ty: shifted_alias_ty,
+                        projection_term: shifted_alias_ty.into(),
                         term: default_ty.into(),
                     },
                     self.bound_vars,
                 )
-                .to_predicate(self.tcx),
+                .upcast(self.tcx),
             );
 
             // We walk the *un-shifted* alias ty, because we're tracking the de bruijn
@@ -243,37 +247,39 @@ fn param_env_reveal_all_normalized(tcx: TyCtxt<'_>, def_id: DefId) -> ty::ParamE
     tcx.param_env(def_id).with_reveal_all_normalized(tcx)
 }
 
-/// If `def_id` is an issue 33140 hack impl, returns its self type; otherwise, returns `None`.
+/// If the given trait impl enables exploiting the former order dependence of trait objects,
+/// returns its self type; otherwise, returns `None`.
 ///
-/// See [`ty::ImplOverlapKind::Issue33140`] for more details.
-fn issue33140_self_ty(tcx: TyCtxt<'_>, def_id: DefId) -> Option<EarlyBinder<Ty<'_>>> {
-    debug!("issue33140_self_ty({:?})", def_id);
-
-    let impl_ = tcx
-        .impl_trait_header(def_id)
-        .unwrap_or_else(|| bug!("issue33140_self_ty called on inherent impl {:?}", def_id));
+/// See [`ty::ImplOverlapKind::FutureCompatOrderDepTraitObjects`] for more details.
+#[instrument(level = "debug", skip(tcx))]
+fn self_ty_of_trait_impl_enabling_order_dep_trait_object_hack(
+    tcx: TyCtxt<'_>,
+    def_id: DefId,
+) -> Option<EarlyBinder<'_, Ty<'_>>> {
+    let impl_ =
+        tcx.impl_trait_header(def_id).unwrap_or_else(|| bug!("called on inherent impl {def_id:?}"));
 
     let trait_ref = impl_.trait_ref.skip_binder();
-    debug!("issue33140_self_ty({:?}), trait-ref={:?}", def_id, trait_ref);
+    debug!(?trait_ref);
 
     let is_marker_like = impl_.polarity == ty::ImplPolarity::Positive
         && tcx.associated_item_def_ids(trait_ref.def_id).is_empty();
 
     // Check whether these impls would be ok for a marker trait.
     if !is_marker_like {
-        debug!("issue33140_self_ty - not marker-like!");
+        debug!("not marker-like!");
         return None;
     }
 
     // impl must be `impl Trait for dyn Marker1 + Marker2 + ...`
     if trait_ref.args.len() != 1 {
-        debug!("issue33140_self_ty - impl has args!");
+        debug!("impl has args!");
         return None;
     }
 
     let predicates = tcx.predicates_of(def_id);
     if predicates.parent.is_some() || !predicates.predicates.is_empty() {
-        debug!("issue33140_self_ty - impl has predicates {:?}!", predicates);
+        debug!(?predicates, "impl has predicates!");
         return None;
     }
 
@@ -284,10 +290,10 @@ fn issue33140_self_ty(tcx: TyCtxt<'_>, def_id: DefId) -> Option<EarlyBinder<Ty<'
     };
 
     if self_ty_matches {
-        debug!("issue33140_self_ty - MATCHES!");
+        debug!("MATCHES!");
         Some(EarlyBinder::bind(self_ty))
     } else {
-        debug!("issue33140_self_ty - non-matching self type");
+        debug!("non-matching self type");
         None
     }
 }
@@ -351,7 +357,7 @@ pub(crate) fn provide(providers: &mut Providers) {
         adt_sized_constraint,
         param_env,
         param_env_reveal_all_normalized,
-        issue33140_self_ty,
+        self_ty_of_trait_impl_enabling_order_dep_trait_object_hack,
         defaultness,
         unsizing_params_for_adt,
         ..*providers

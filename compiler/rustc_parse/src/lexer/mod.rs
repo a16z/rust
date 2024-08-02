@@ -1,23 +1,25 @@
 use std::ops::Range;
 
-use crate::errors;
-use crate::lexer::unicode_chars::UNICODE_ARRAY;
-use crate::make_unclosed_delims_error;
 use rustc_ast::ast::{self, AttrStyle};
 use rustc_ast::token::{self, CommentKind, Delimiter, IdentIsRaw, Token, TokenKind};
 use rustc_ast::tokenstream::TokenStream;
 use rustc_ast::util::unicode::contains_text_flow_control_chars;
-use rustc_errors::{codes::*, Applicability, Diag, DiagCtxt, StashKey};
+use rustc_errors::codes::*;
+use rustc_errors::{Applicability, Diag, DiagCtxtHandle, StashKey};
 use rustc_lexer::unescape::{self, EscapeError, Mode};
-use rustc_lexer::{Base, DocStyle, RawStrError};
-use rustc_lexer::{Cursor, LiteralKind};
+use rustc_lexer::{Base, Cursor, DocStyle, LiteralKind, RawStrError};
 use rustc_session::lint::builtin::{
     RUST_2021_PREFIXES_INCOMPATIBLE_SYNTAX, TEXT_DIRECTION_CODEPOINT_IN_COMMENT,
 };
 use rustc_session::lint::BuiltinLintDiag;
 use rustc_session::parse::ParseSess;
+use rustc_span::edition::Edition;
 use rustc_span::symbol::Symbol;
-use rustc_span::{edition::Edition, BytePos, Pos, Span};
+use rustc_span::{BytePos, Pos, Span};
+use tracing::debug;
+
+use crate::lexer::unicode_chars::UNICODE_ARRAY;
+use crate::{errors, make_unclosed_delims_error};
 
 mod diagnostics;
 mod tokentrees;
@@ -30,7 +32,7 @@ use unescape_error_reporting::{emit_unescape_error, escaped_char};
 //
 // This assertion is in this crate, rather than in `rustc_lexer`, because that
 // crate cannot depend on `rustc_data_structures`.
-#[cfg(all(any(target_arch = "x86_64", target_arch = "aarch64"), target_pointer_width = "64"))]
+#[cfg(target_pointer_width = "64")]
 rustc_data_structures::static_assert_size!(rustc_lexer::Token, 12);
 
 #[derive(Clone, Debug)]
@@ -41,7 +43,7 @@ pub(crate) struct UnmatchedDelim {
     pub candidate_span: Option<Span>,
 }
 
-pub(crate) fn parse_token_trees<'psess, 'src>(
+pub(crate) fn lex_token_trees<'psess, 'src>(
     psess: &'psess ParseSess,
     mut src: &'src str,
     mut start_pos: BytePos,
@@ -65,7 +67,7 @@ pub(crate) fn parse_token_trees<'psess, 'src>(
         last_lifetime: None,
     };
     let (stream, res, unmatched_delims) =
-        tokentrees::TokenTreesReader::parse_all_token_trees(string_reader);
+        tokentrees::TokenTreesReader::lex_all_token_trees(string_reader);
     match res {
         Ok(()) if unmatched_delims.is_empty() => Ok(stream),
         _ => {
@@ -112,8 +114,8 @@ struct StringReader<'psess, 'src> {
 }
 
 impl<'psess, 'src> StringReader<'psess, 'src> {
-    pub fn dcx(&self) -> &'psess DiagCtxt {
-        &self.psess.dcx
+    fn dcx(&self) -> DiagCtxtHandle<'psess> {
+        self.psess.dcx()
     }
 
     fn mk_sp(&self, lo: BytePos, hi: BytePos) -> Span {
@@ -204,6 +206,7 @@ impl<'psess, 'src> StringReader<'psess, 'src> {
                     self.ident(start)
                 }
                 rustc_lexer::TokenKind::InvalidIdent
+                | rustc_lexer::TokenKind::InvalidPrefix
                     // Do not recover an identifier with emoji if the codepoint is a confusable
                     // with a recoverable substitution token, like `➖`.
                     if !UNICODE_ARRAY
@@ -246,8 +249,8 @@ impl<'psess, 'src> StringReader<'psess, 'src> {
                     let suffix = if suffix_start < self.pos {
                         let string = self.str_from(suffix_start);
                         if string == "_" {
-                            self.psess
-                                .dcx
+                            self
+                                .dcx()
                                 .emit_err(errors::UnderscoreLiteralSuffix { span: self.mk_sp(suffix_start, self.pos) });
                             None
                         } else {
@@ -301,7 +304,9 @@ impl<'psess, 'src> StringReader<'psess, 'src> {
                 rustc_lexer::TokenKind::Caret => token::BinOp(token::Caret),
                 rustc_lexer::TokenKind::Percent => token::BinOp(token::Percent),
 
-                rustc_lexer::TokenKind::Unknown | rustc_lexer::TokenKind::InvalidIdent => {
+                rustc_lexer::TokenKind::Unknown
+                | rustc_lexer::TokenKind::InvalidIdent
+                | rustc_lexer::TokenKind::InvalidPrefix => {
                     // Don't emit diagnostics for sequences of the same invalid token
                     if swallow_next_invalid > 0 {
                         swallow_next_invalid -= 1;
@@ -367,11 +372,10 @@ impl<'psess, 'src> StringReader<'psess, 'src> {
         let content = self.str_from(content_start);
         if contains_text_flow_control_chars(content) {
             let span = self.mk_sp(start, self.pos);
-            self.psess.buffer_lint_with_diagnostic(
+            self.psess.buffer_lint(
                 TEXT_DIRECTION_CODEPOINT_IN_COMMENT,
                 span,
                 ast::CRATE_NODE_ID,
-                "unicode codepoint changing visible direction of text present in comment",
                 BuiltinLintDiag::UnicodeTextFlow(span, content.to_string()),
             );
         }
@@ -594,8 +598,7 @@ impl<'psess, 'src> StringReader<'psess, 'src> {
     }
 
     fn report_non_started_raw_string(&self, start: BytePos, bad_char: char) -> ! {
-        self.psess
-            .dcx
+        self.dcx()
             .struct_span_fatal(
                 self.mk_sp(start, self.pos),
                 format!(
@@ -697,7 +700,6 @@ impl<'psess, 'src> StringReader<'psess, 'src> {
         let expn_data = prefix_span.ctxt().outer_expn_data();
 
         if expn_data.edition >= Edition::Edition2021 {
-            let mut silence = false;
             // In Rust 2021, this is a hard error.
             let sugg = if prefix == "rb" {
                 Some(errors::UnknownPrefixSugg::UseBr(prefix_span))
@@ -705,33 +707,27 @@ impl<'psess, 'src> StringReader<'psess, 'src> {
                 if self.cursor.first() == '\''
                     && let Some(start) = self.last_lifetime
                     && self.cursor.third() != '\''
+                    && let end = self.mk_sp(self.pos, self.pos + BytePos(1))
+                    && !self.psess.source_map().is_multiline(start.until(end))
                 {
-                    // An "unclosed `char`" error will be emitted already, silence redundant error.
-                    silence = true;
-                    Some(errors::UnknownPrefixSugg::MeantStr {
-                        start,
-                        end: self.mk_sp(self.pos, self.pos + BytePos(1)),
-                    })
+                    // FIXME: An "unclosed `char`" error will be emitted already in some cases,
+                    // but it's hard to silence this error while not also silencing important cases
+                    // too. We should use the error stashing machinery instead.
+                    Some(errors::UnknownPrefixSugg::MeantStr { start, end })
                 } else {
                     Some(errors::UnknownPrefixSugg::Whitespace(prefix_span.shrink_to_hi()))
                 }
             } else {
                 None
             };
-            let err = errors::UnknownPrefix { span: prefix_span, prefix, sugg };
-            if silence {
-                self.dcx().create_err(err).delay_as_bug();
-            } else {
-                self.dcx().emit_err(err);
-            }
+            self.dcx().emit_err(errors::UnknownPrefix { span: prefix_span, prefix, sugg });
         } else {
             // Before Rust 2021, only emit a lint for migration.
-            self.psess.buffer_lint_with_diagnostic(
+            self.psess.buffer_lint(
                 RUST_2021_PREFIXES_INCOMPATIBLE_SYNTAX,
                 prefix_span,
                 ast::CRATE_NODE_ID,
-                format!("prefix `{prefix}` is unknown"),
-                BuiltinLintDiag::ReservedPrefix(prefix_span),
+                BuiltinLintDiag::ReservedPrefix(prefix_span, prefix.to_string()),
             );
         }
     }

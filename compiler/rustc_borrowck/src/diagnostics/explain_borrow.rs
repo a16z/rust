@@ -17,15 +17,13 @@ use rustc_middle::ty::adjustment::PointerCoercion;
 use rustc_middle::ty::{self, RegionVid, Ty, TyCtxt};
 use rustc_span::symbol::{kw, Symbol};
 use rustc_span::{sym, DesugaringKind, Span};
-use rustc_trait_selection::traits::error_reporting::FindExprBySpan;
-
-use crate::region_infer::{BlameConstraint, ExtraConstraintInfo};
-use crate::{
-    borrow_set::BorrowData, nll::ConstraintDescription, region_infer::Cause, MirBorrowckCtxt,
-    WriteKind,
-};
+use rustc_trait_selection::error_reporting::traits::FindExprBySpan;
 
 use super::{find_use, RegionName, UseSpans};
+use crate::borrow_set::BorrowData;
+use crate::nll::ConstraintDescription;
+use crate::region_infer::{BlameConstraint, Cause, ExtraConstraintInfo};
+use crate::{MirBorrowckCtxt, WriteKind};
 
 #[derive(Debug)]
 pub(crate) enum BorrowExplanation<'tcx> {
@@ -76,7 +74,7 @@ impl<'tcx> BorrowExplanation<'tcx> {
                 && let Some(body_id) = node.body_id()
             {
                 let body = tcx.hir().body(body_id);
-                let mut expr_finder = FindExprBySpan::new(span);
+                let mut expr_finder = FindExprBySpan::new(span, tcx);
                 expr_finder.visit_expr(body.value);
                 if let Some(mut expr) = expr_finder.result {
                     while let hir::ExprKind::AddrOf(_, _, inner)
@@ -317,36 +315,39 @@ impl<'tcx> BorrowExplanation<'tcx> {
             let mut has_dyn = false;
             let mut failed = false;
 
-            let elaborated_args = std::iter::zip(*args, &generics.params).map(|(arg, param)| {
-                if let Some(ty::Dynamic(obj, _, ty::Dyn)) = arg.as_type().map(Ty::kind) {
-                    let default = tcx.object_lifetime_default(param.def_id);
+            let elaborated_args =
+                std::iter::zip(*args, &generics.own_params).map(|(arg, param)| {
+                    if let Some(ty::Dynamic(obj, _, ty::Dyn)) = arg.as_type().map(Ty::kind) {
+                        let default = tcx.object_lifetime_default(param.def_id);
 
-                    let re_static = tcx.lifetimes.re_static;
+                        let re_static = tcx.lifetimes.re_static;
 
-                    let implied_region = match default {
-                        // This is not entirely precise.
-                        ObjectLifetimeDefault::Empty => re_static,
-                        ObjectLifetimeDefault::Ambiguous => {
-                            failed = true;
-                            re_static
-                        }
-                        ObjectLifetimeDefault::Param(param_def_id) => {
-                            let index = generics.param_def_id_to_index[&param_def_id] as usize;
-                            args.get(index).and_then(|arg| arg.as_region()).unwrap_or_else(|| {
+                        let implied_region = match default {
+                            // This is not entirely precise.
+                            ObjectLifetimeDefault::Empty => re_static,
+                            ObjectLifetimeDefault::Ambiguous => {
                                 failed = true;
                                 re_static
-                            })
-                        }
-                        ObjectLifetimeDefault::Static => re_static,
-                    };
+                            }
+                            ObjectLifetimeDefault::Param(param_def_id) => {
+                                let index = generics.param_def_id_to_index[&param_def_id] as usize;
+                                args.get(index).and_then(|arg| arg.as_region()).unwrap_or_else(
+                                    || {
+                                        failed = true;
+                                        re_static
+                                    },
+                                )
+                            }
+                            ObjectLifetimeDefault::Static => re_static,
+                        };
 
-                    has_dyn = true;
+                        has_dyn = true;
 
-                    Ty::new_dynamic(tcx, obj, implied_region, ty::Dyn).into()
-                } else {
-                    arg
-                }
-            });
+                        Ty::new_dynamic(tcx, obj, implied_region, ty::Dyn).into()
+                    } else {
+                        arg
+                    }
+                });
             let elaborated_ty = Ty::new_adt(tcx, *def, tcx.mk_args_from_iter(elaborated_args));
 
             if has_dyn && !failed {
@@ -386,7 +387,7 @@ impl<'tcx> BorrowExplanation<'tcx> {
     }
 }
 
-impl<'cx, 'tcx> MirBorrowckCtxt<'cx, 'tcx> {
+impl<'tcx> MirBorrowckCtxt<'_, '_, '_, 'tcx> {
     fn free_region_constraint_info(
         &self,
         borrow_region: RegionVid,

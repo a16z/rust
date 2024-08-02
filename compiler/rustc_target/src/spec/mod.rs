@@ -34,15 +34,6 @@
 //! the target's settings, though `target-feature` and `link-args` will *add*
 //! to the list specified by the target, rather than replace.
 
-use crate::abi::call::Conv;
-use crate::abi::{Endian, Integer, Size, TargetDataLayout, TargetDataLayoutErrors};
-use crate::json::{Json, ToJson};
-use crate::spec::abi::{lookup as lookup_abi, Abi};
-use crate::spec::crt_objects::CrtObjects;
-use rustc_fs_util::try_canonicalize;
-use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
-use rustc_span::symbol::{kw, sym, Symbol};
-use serde_json::Value;
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -51,15 +42,27 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::{fmt, io};
 
-use rustc_macros::HashStable_Generic;
+use rustc_fs_util::try_canonicalize;
+use rustc_macros::{Decodable, Encodable, HashStable_Generic};
+use rustc_serialize::{Decodable, Decoder, Encodable, Encoder};
+use rustc_span::symbol::{kw, sym, Symbol};
+use serde_json::Value;
+use tracing::debug;
+
+use crate::abi::call::Conv;
+use crate::abi::{Endian, Integer, Size, TargetDataLayout, TargetDataLayoutErrors};
+use crate::json::{Json, ToJson};
+use crate::spec::abi::Abi;
+use crate::spec::crt_objects::CrtObjects;
 
 pub mod abi;
 pub mod crt_objects;
 
 mod base;
-pub use base::apple::deployment_target as current_apple_deployment_target;
-pub use base::apple::platform as current_apple_platform;
-pub use base::apple::sdk_version as current_apple_sdk_version;
+pub use base::apple::{
+    deployment_target as current_apple_deployment_target, platform as current_apple_platform,
+    sdk_version as current_apple_sdk_version,
+};
 pub use base::avr_gnu::ef_avr_arch;
 
 /// Linker is called through a C/C++ compiler.
@@ -448,6 +451,28 @@ impl LinkerFlavor {
             | LinkerFlavor::Ptx => false,
         }
     }
+
+    /// For flavors with an `Lld` component, ensure it's enabled. Otherwise, returns the given
+    /// flavor unmodified.
+    pub fn with_lld_enabled(self) -> LinkerFlavor {
+        match self {
+            LinkerFlavor::Gnu(cc, Lld::No) => LinkerFlavor::Gnu(cc, Lld::Yes),
+            LinkerFlavor::Darwin(cc, Lld::No) => LinkerFlavor::Darwin(cc, Lld::Yes),
+            LinkerFlavor::Msvc(Lld::No) => LinkerFlavor::Msvc(Lld::Yes),
+            _ => self,
+        }
+    }
+
+    /// For flavors with an `Lld` component, ensure it's disabled. Otherwise, returns the given
+    /// flavor unmodified.
+    pub fn with_lld_disabled(self) -> LinkerFlavor {
+        match self {
+            LinkerFlavor::Gnu(cc, Lld::Yes) => LinkerFlavor::Gnu(cc, Lld::No),
+            LinkerFlavor::Darwin(cc, Lld::Yes) => LinkerFlavor::Darwin(cc, Lld::No),
+            LinkerFlavor::Msvc(Lld::Yes) => LinkerFlavor::Msvc(Lld::No),
+            _ => self,
+        }
+    }
 }
 
 macro_rules! linker_flavor_cli_impls {
@@ -581,19 +606,6 @@ impl LinkSelfContainedDefault {
         self == LinkSelfContainedDefault::False
     }
 
-    /// Returns whether the target spec explicitly requests self-contained linking, i.e. not via
-    /// inference.
-    pub fn is_linker_enabled(self) -> bool {
-        match self {
-            LinkSelfContainedDefault::True => true,
-            LinkSelfContainedDefault::False => false,
-            LinkSelfContainedDefault::WithComponents(c) => {
-                c.contains(LinkSelfContainedComponents::LINKER)
-            }
-            _ => false,
-        }
-    }
-
     /// Returns the key to use when serializing the setting to json:
     /// - individual components in a `link-self-contained` object value
     /// - the other variants as a backwards-compatible `crt-objects-fallback` string
@@ -602,6 +614,12 @@ impl LinkSelfContainedDefault {
             LinkSelfContainedDefault::WithComponents(_) => "link-self-contained",
             _ => "crt-objects-fallback",
         }
+    }
+
+    /// Creates a `LinkSelfContainedDefault` enabling the self-contained linker for target specs
+    /// (the equivalent of `-Clink-self-contained=+linker` on the CLI).
+    pub fn with_linker() -> LinkSelfContainedDefault {
+        LinkSelfContainedDefault::WithComponents(LinkSelfContainedComponents::LINKER)
     }
 }
 
@@ -698,10 +716,70 @@ impl ToJson for LinkSelfContainedComponents {
     }
 }
 
+bitflags::bitflags! {
+    /// The `-Z linker-features` components that can individually be enabled or disabled.
+    ///
+    /// They are feature flags intended to be a more flexible mechanism than linker flavors, and
+    /// also to prevent a combinatorial explosion of flavors whenever a new linker feature is
+    /// required. These flags are "generic", in the sense that they can work on multiple targets on
+    /// the CLI. Otherwise, one would have to select different linkers flavors for each target.
+    ///
+    /// Here are some examples of the advantages they offer:
+    /// - default feature sets for principal flavors, or for specific targets.
+    /// - flavor-specific features: for example, clang offers automatic cross-linking with
+    ///   `--target`, which gcc-style compilers don't support. The *flavor* is still a C/C++
+    ///   compiler, and we don't need to multiply the number of flavors for this use-case. Instead,
+    ///   we can have a single `+target` feature.
+    /// - umbrella features: for example if clang accumulates more features in the future than just
+    ///   the `+target` above. That could be modeled as `+clang`.
+    /// - niche features for resolving specific issues: for example, on Apple targets the linker
+    ///   flag implementing the `as-needed` native link modifier (#99424) is only possible on
+    ///   sufficiently recent linker versions.
+    /// - still allows for discovery and automation, for example via feature detection. This can be
+    ///   useful in exotic environments/build systems.
+    #[derive(Clone, Copy, PartialEq, Eq, Default)]
+    pub struct LinkerFeatures: u8 {
+        /// Invoke the linker via a C/C++ compiler (e.g. on most unix targets).
+        const CC  = 1 << 0;
+        /// Use the lld linker, either the system lld or the self-contained linker `rust-lld`.
+        const LLD = 1 << 1;
+    }
+}
+rustc_data_structures::external_bitflags_debug! { LinkerFeatures }
+
+impl LinkerFeatures {
+    /// Parses a single `-Z linker-features` well-known feature, not a set of flags.
+    pub fn from_str(s: &str) -> Option<LinkerFeatures> {
+        Some(match s {
+            "cc" => LinkerFeatures::CC,
+            "lld" => LinkerFeatures::LLD,
+            _ => return None,
+        })
+    }
+
+    /// Returns whether the `lld` linker feature is enabled.
+    pub fn is_lld_enabled(self) -> bool {
+        self.contains(LinkerFeatures::LLD)
+    }
+
+    /// Returns whether the `cc` linker feature is enabled.
+    pub fn is_cc_enabled(self) -> bool {
+        self.contains(LinkerFeatures::CC)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Hash, Encodable, Decodable, HashStable_Generic)]
 pub enum PanicStrategy {
     Unwind,
     Abort,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Hash, Encodable, Decodable, HashStable_Generic)]
+pub enum OnBrokenPipe {
+    Default,
+    Kill,
+    Error,
+    Inherit,
 }
 
 impl PanicStrategy {
@@ -1242,6 +1320,34 @@ bitflags::bitflags! {
 rustc_data_structures::external_bitflags_debug! { SanitizerSet }
 
 impl SanitizerSet {
+    // Taken from LLVM's sanitizer compatibility logic:
+    // https://github.com/llvm/llvm-project/blob/release/18.x/clang/lib/Driver/SanitizerArgs.cpp#L512
+    const MUTUALLY_EXCLUSIVE: &'static [(SanitizerSet, SanitizerSet)] = &[
+        (SanitizerSet::ADDRESS, SanitizerSet::MEMORY),
+        (SanitizerSet::ADDRESS, SanitizerSet::THREAD),
+        (SanitizerSet::ADDRESS, SanitizerSet::HWADDRESS),
+        (SanitizerSet::ADDRESS, SanitizerSet::MEMTAG),
+        (SanitizerSet::ADDRESS, SanitizerSet::KERNELADDRESS),
+        (SanitizerSet::ADDRESS, SanitizerSet::SAFESTACK),
+        (SanitizerSet::LEAK, SanitizerSet::MEMORY),
+        (SanitizerSet::LEAK, SanitizerSet::THREAD),
+        (SanitizerSet::LEAK, SanitizerSet::KERNELADDRESS),
+        (SanitizerSet::LEAK, SanitizerSet::SAFESTACK),
+        (SanitizerSet::MEMORY, SanitizerSet::THREAD),
+        (SanitizerSet::MEMORY, SanitizerSet::HWADDRESS),
+        (SanitizerSet::MEMORY, SanitizerSet::KERNELADDRESS),
+        (SanitizerSet::MEMORY, SanitizerSet::SAFESTACK),
+        (SanitizerSet::THREAD, SanitizerSet::HWADDRESS),
+        (SanitizerSet::THREAD, SanitizerSet::KERNELADDRESS),
+        (SanitizerSet::THREAD, SanitizerSet::SAFESTACK),
+        (SanitizerSet::HWADDRESS, SanitizerSet::MEMTAG),
+        (SanitizerSet::HWADDRESS, SanitizerSet::KERNELADDRESS),
+        (SanitizerSet::HWADDRESS, SanitizerSet::SAFESTACK),
+        (SanitizerSet::CFI, SanitizerSet::KCFI),
+        (SanitizerSet::MEMTAG, SanitizerSet::KERNELADDRESS),
+        (SanitizerSet::KERNELADDRESS, SanitizerSet::SAFESTACK),
+    ];
+
     /// Return sanitizer's name
     ///
     /// Returns none if the flags is a set of sanitizers numbering not exactly one.
@@ -1261,6 +1367,13 @@ impl SanitizerSet {
             SanitizerSet::HWADDRESS => "hwaddress",
             _ => return None,
         })
+    }
+
+    pub fn mutually_exclusive(self) -> Option<(SanitizerSet, SanitizerSet)> {
+        Self::MUTUALLY_EXCLUSIVE
+            .into_iter()
+            .find(|&(a, b)| self.contains(*a) && self.contains(*b))
+            .copied()
     }
 }
 
@@ -1301,6 +1414,20 @@ pub enum FramePointer {
     ///
     /// This option does not guarantee that the frame pointers will be omitted.
     MayOmit,
+}
+
+impl FramePointer {
+    /// It is intended that the "force frame pointer" transition is "one way"
+    /// so this convenience assures such if used
+    #[inline]
+    pub fn ratchet(&mut self, rhs: FramePointer) -> FramePointer {
+        *self = match (*self, rhs) {
+            (FramePointer::Always, _) | (_, FramePointer::Always) => FramePointer::Always,
+            (FramePointer::NonLeaf, _) | (_, FramePointer::NonLeaf) => FramePointer::NonLeaf,
+            _ => FramePointer::MayOmit,
+        };
+        *self
+    }
 }
 
 impl FromStr for FramePointer {
@@ -1537,6 +1664,7 @@ supported_targets! {
     ("x86_64-unknown-l4re-uclibc", x86_64_unknown_l4re_uclibc),
 
     ("aarch64-unknown-redox", aarch64_unknown_redox),
+    ("i686-unknown-redox", i686_unknown_redox),
     ("x86_64-unknown-redox", x86_64_unknown_redox),
 
     ("i386-apple-ios", i386_apple_ios),
@@ -1657,6 +1785,13 @@ supported_targets! {
 
     ("nvptx64-nvidia-cuda", nvptx64_nvidia_cuda),
 
+    ("xtensa-esp32-none-elf", xtensa_esp32_none_elf),
+    ("xtensa-esp32-espidf", xtensa_esp32_espidf),
+    ("xtensa-esp32s2-none-elf", xtensa_esp32s2_none_elf),
+    ("xtensa-esp32s2-espidf", xtensa_esp32s2_espidf),
+    ("xtensa-esp32s3-none-elf", xtensa_esp32s3_none_elf),
+    ("xtensa-esp32s3-espidf", xtensa_esp32s3_espidf),
+
     ("i686-wrs-vxworks", i686_wrs_vxworks),
     ("x86_64-wrs-vxworks", x86_64_wrs_vxworks),
     ("armv7-wrs-vxworks-eabihf", armv7_wrs_vxworks_eabihf),
@@ -1706,6 +1841,22 @@ supported_targets! {
     ("aarch64-unknown-linux-ohos", aarch64_unknown_linux_ohos),
     ("armv7-unknown-linux-ohos", armv7_unknown_linux_ohos),
     ("x86_64-unknown-linux-ohos", x86_64_unknown_linux_ohos),
+
+    ("x86_64-unknown-linux-none", x86_64_unknown_linux_none),
+
+    ("thumbv6m-nuttx-eabi", thumbv6m_nuttx_eabi),
+    ("thumbv7m-nuttx-eabi", thumbv7m_nuttx_eabi),
+    ("thumbv7em-nuttx-eabi", thumbv7em_nuttx_eabi),
+    ("thumbv7em-nuttx-eabihf", thumbv7em_nuttx_eabihf),
+    ("thumbv8m.base-nuttx-eabi", thumbv8m_base_nuttx_eabi),
+    ("thumbv8m.main-nuttx-eabi", thumbv8m_main_nuttx_eabi),
+    ("thumbv8m.main-nuttx-eabihf", thumbv8m_main_nuttx_eabihf),
+    ("riscv32imc-unknown-nuttx-elf", riscv32imc_unknown_nuttx_elf),
+    ("riscv32imac-unknown-nuttx-elf", riscv32imac_unknown_nuttx_elf),
+    ("riscv32imafc-unknown-nuttx-elf", riscv32imafc_unknown_nuttx_elf),
+    ("riscv64imac-unknown-nuttx-elf", riscv64imac_unknown_nuttx_elf),
+    ("riscv64gc-unknown-nuttx-elf", riscv64gc_unknown_nuttx_elf),
+
 }
 
 /// Cow-Vec-Str: Cow<'static, [Cow<'static, str>]>
@@ -1840,6 +1991,19 @@ impl HasTargetSpec for Target {
     fn target_spec(&self) -> &Target {
         self
     }
+}
+
+/// Which C ABI to use for `wasm32-unknown-unknown`.
+#[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+pub enum WasmCAbi {
+    /// Spec-compliant C ABI.
+    Spec,
+    /// Legacy ABI. Which is non-spec-compliant.
+    Legacy,
+}
+
+pub trait HasWasmCAbiOpt {
+    fn wasm_c_abi_opt(&self) -> WasmCAbi;
 }
 
 type StaticCow<T> = Cow<'static, T>;
@@ -2200,9 +2364,6 @@ pub struct TargetOptions {
     /// distributed with the target, the sanitizer should still appear in this list for the target.
     pub supported_sanitizers: SanitizerSet,
 
-    /// If present it's a default value to use for adjusting the C ABI.
-    pub default_adjusted_cabi: Option<Abi>,
-
     /// Minimum number of bits in #[repr(C)] enum. Defaults to the size of c_int
     pub c_enum_min_bits: Option<u64>,
 
@@ -2434,7 +2595,6 @@ impl Default for TargetOptions {
             // `Off` is supported by default, but targets can remove this manually, e.g. Windows.
             supported_split_debuginfo: Cow::Borrowed(&[SplitDebuginfo::Off]),
             supported_sanitizers: SanitizerSet::empty(),
-            default_adjusted_cabi: None,
             c_enum_min_bits: None,
             generate_arange_section: true,
             supports_stack_protector: true,
@@ -2467,8 +2627,6 @@ impl Target {
     /// Given a function ABI, turn it into the correct ABI for this target.
     pub fn adjust_abi(&self, abi: Abi, c_variadic: bool) -> Abi {
         match abi {
-            Abi::C { .. } => self.default_adjusted_cabi.unwrap_or(abi),
-
             // On Windows, `extern "system"` behaves like msvc's `__stdcall`.
             // `__stdcall` only applies on x86 and on non-variadic functions:
             // https://learn.microsoft.com/en-us/cpp/cpp/stdcall?view=msvc-170
@@ -2521,7 +2679,6 @@ impl Target {
             Msp430Interrupt => self.arch == "msp430",
             RiscvInterruptM | RiscvInterruptS => ["riscv32", "riscv64"].contains(&&self.arch[..]),
             AvrInterrupt | AvrNonBlockingInterrupt => self.arch == "avr",
-            Wasm => ["wasm32", "wasm64"].contains(&&self.arch[..]),
             Thiscall { .. } => self.arch == "x86",
             // On windows these fall-back to platform native calling convention (C) when the
             // architecture is not supported.
@@ -3006,16 +3163,6 @@ impl Target {
                     }
                 }
             } );
-            ($key_name:ident, Option<Abi>) => ( {
-                let name = (stringify!($key_name)).replace("_", "-");
-                obj.remove(&name).and_then(|o| o.as_str().and_then(|s| {
-                    match lookup_abi(s) {
-                        Ok(abi) => base.$key_name = Some(abi),
-                        _ => return Some(Err(format!("'{}' is not a valid value for abi", s))),
-                    }
-                    Some(Ok(()))
-                })).unwrap_or(Ok(()))
-            } );
             ($key_name:ident, TargetFamilies) => ( {
                 if let Some(value) = obj.remove("target-family") {
                     if let Some(v) = value.as_array() {
@@ -3165,7 +3312,6 @@ impl Target {
         key!(split_debuginfo, SplitDebuginfo)?;
         key!(supported_split_debuginfo, fallible_list)?;
         key!(supported_sanitizers, SanitizerSet)?;
-        key!(default_adjusted_cabi, Option<Abi>)?;
         key!(generate_arange_section, bool);
         key!(supports_stack_protector, bool);
         key!(entry_name);
@@ -3211,8 +3357,7 @@ impl Target {
         target_triple: &TargetTriple,
         sysroot: &Path,
     ) -> Result<(Target, TargetWarnings), String> {
-        use std::env;
-        use std::fs;
+        use std::{env, fs};
 
         fn load_file(path: &Path) -> Result<(Target, TargetWarnings), String> {
             let contents = fs::read_to_string(path).map_err(|e| e.to_string())?;
@@ -3245,7 +3390,7 @@ impl Target {
 
                 // Additionally look in the sysroot under `lib/rustlib/<triple>/target.json`
                 // as a fallback.
-                let rustlib_path = crate::target_rustlib_path(sysroot, target_triple);
+                let rustlib_path = crate::relative_target_rustlib_path(sysroot, target_triple);
                 let p = PathBuf::from_iter([
                     Path::new(sysroot),
                     Path::new(&rustlib_path),
@@ -3428,10 +3573,6 @@ impl ToJson for Target {
         target_option_val!(entry_name);
         target_option_val!(entry_abi);
         target_option_val!(supports_xray);
-
-        if let Some(abi) = self.default_adjusted_cabi {
-            d.insert("default-adjusted-cabi".into(), Abi::name(abi).to_json());
-        }
 
         // Serializing `-Clink-self-contained` needs a dynamic key to support the
         // backwards-compatible variants.

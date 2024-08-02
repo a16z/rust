@@ -1,5 +1,5 @@
 error[E0507]: cannot move out of `selection.1` which is behind a shared reference
-  --> $DIR/option-content-move.rs:10:20
+  --> $DIR/option-content-move.rs:11:20
    |
 LL |                 if selection.1.unwrap().contains(selection.0) {
    |                    ^^^^^^^^^^^ -------- `selection.1` moved due to this method call
@@ -13,9 +13,13 @@ help: you can `clone` the value and consume it, but this might not be your desir
    |
 LL |                 if <Option<String> as Clone>::clone(&selection.1).unwrap().contains(selection.0) {
    |                    ++++++++++++++++++++++++++++++++++           +
+help: consider cloning the value if the performance cost is acceptable
+   |
+LL |                 if selection.1.clone().unwrap().contains(selection.0) {
+   |                               ++++++++
 
 error[E0507]: cannot move out of `selection.1` which is behind a shared reference
-  --> $DIR/option-content-move.rs:28:20
+  --> $DIR/option-content-move.rs:30:20
    |
 LL |                 if selection.1.unwrap().contains(selection.0) {
    |                    ^^^^^^^^^^^ -------- `selection.1` moved due to this method call
@@ -29,6 +33,10 @@ help: you can `clone` the value and consume it, but this might not be your desir
    |
 LL |                 if <Result<String, String> as Clone>::clone(&selection.1).unwrap().contains(selection.0) {
    |                    ++++++++++++++++++++++++++++++++++++++++++           +
+help: consider cloning the value if the performance cost is acceptable
+   |
+LL |                 if selection.1.clone().unwrap().contains(selection.0) {
+   |                               ++++++++
 
 error: aborting due to 2 previous errors
 

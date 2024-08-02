@@ -17,6 +17,7 @@ pub mod fd;
 pub mod fs;
 #[path = "../unsupported/io.rs"]
 pub mod io;
+mod libunwind_integration;
 pub mod net;
 pub mod os;
 #[path = "../unsupported/pipe.rs"]
@@ -25,7 +26,6 @@ pub mod pipe;
 pub mod process;
 pub mod stdio;
 pub mod thread;
-pub mod thread_local_key;
 pub mod thread_parking;
 pub mod time;
 pub mod waitqueue;

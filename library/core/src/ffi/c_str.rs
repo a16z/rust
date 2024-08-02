@@ -3,16 +3,11 @@
 use crate::cmp::Ordering;
 use crate::error::Error;
 use crate::ffi::c_char;
-use crate::fmt;
-use crate::intrinsics;
 use crate::iter::FusedIterator;
 use crate::marker::PhantomData;
-use crate::ops;
-use crate::ptr::addr_of;
-use crate::ptr::NonNull;
-use crate::slice;
+use crate::ptr::{addr_of, NonNull};
 use crate::slice::memchr;
-use crate::str;
+use crate::{fmt, intrinsics, ops, slice, str};
 
 // FIXME: because this is doc(inline)d, we *have* to use intra-doc links because the actual link
 //   depends on where the item is being documented. however, since this is libcore, we can't
@@ -23,28 +18,32 @@ use crate::str;
 ///
 /// This type represents a borrowed reference to a nul-terminated
 /// array of bytes. It can be constructed safely from a <code>&[[u8]]</code>
-/// slice, or unsafely from a raw `*const c_char`. It can then be
-/// converted to a Rust <code>&[str]</code> by performing UTF-8 validation, or
-/// into an owned `CString`.
+/// slice, or unsafely from a raw `*const c_char`. It can be expressed as a
+/// literal in the form `c"Hello world"`.
+///
+/// The `CStr` can then be converted to a Rust <code>&[str]</code> by performing
+/// UTF-8 validation, or into an owned `CString`.
 ///
 /// `&CStr` is to `CString` as <code>&[str]</code> is to `String`: the former
 /// in each pair are borrowed references; the latter are owned
 /// strings.
 ///
 /// Note that this structure does **not** have a guaranteed layout (the `repr(transparent)`
-/// notwithstanding) and is not recommended to be placed in the signatures of FFI functions.
-/// Instead, safe wrappers of FFI functions may leverage the unsafe [`CStr::from_ptr`] constructor
-/// to provide a safe interface to other consumers.
+/// notwithstanding) and should not be placed in the signatures of FFI functions.
+/// Instead, safe wrappers of FFI functions may leverage [`CStr::as_ptr`] and the unsafe
+/// [`CStr::from_ptr`] constructor to provide a safe interface to other consumers.
 ///
 /// # Examples
 ///
 /// Inspecting a foreign C string:
 ///
-/// ```ignore (extern-declaration)
+/// ```
 /// use std::ffi::CStr;
 /// use std::os::raw::c_char;
 ///
+/// # /* Extern functions are awkward in doc comments - fake it instead
 /// extern "C" { fn my_string() -> *const c_char; }
+/// # */ unsafe extern "C" fn my_string() -> *const c_char { c"hello".as_ptr() }
 ///
 /// unsafe {
 ///     let slice = CStr::from_ptr(my_string());
@@ -54,12 +53,14 @@ use crate::str;
 ///
 /// Passing a Rust-originating C string:
 ///
-/// ```ignore (extern-declaration)
+/// ```
 /// use std::ffi::{CString, CStr};
 /// use std::os::raw::c_char;
 ///
 /// fn work(data: &CStr) {
+/// #   /* Extern functions are awkward in doc comments - fake it instead
 ///     extern "C" { fn work_with(data: *const c_char); }
+/// #   */ unsafe extern "C" fn work_with(s: *const c_char) {}
 ///
 ///     unsafe { work_with(data.as_ptr()) }
 /// }
@@ -70,11 +71,13 @@ use crate::str;
 ///
 /// Converting a foreign C string into a Rust `String`:
 ///
-/// ```ignore (extern-declaration)
+/// ```
 /// use std::ffi::CStr;
 /// use std::os::raw::c_char;
 ///
+/// # /* Extern functions are awkward in doc comments - fake it instead
 /// extern "C" { fn my_string() -> *const c_char; }
+/// # */ unsafe extern "C" fn my_string() -> *const c_char { c"hello".as_ptr() }
 ///
 /// fn my_string_safe() -> String {
 ///     let cstr = unsafe { CStr::from_ptr(my_string()) };
@@ -86,7 +89,7 @@ use crate::str;
 /// ```
 ///
 /// [str]: prim@str "str"
-#[derive(Hash)]
+#[derive(PartialEq, Eq, Hash)]
 #[stable(feature = "core_c_str", since = "1.64.0")]
 #[rustc_has_incoherent_inherent_impls]
 #[lang = "CStr"]
@@ -95,8 +98,7 @@ use crate::str;
 // However, `CStr` layout is considered an implementation detail and must not be relied upon. We
 // want `repr(transparent)` but we don't want it to show up in rustdoc, so we hide it under
 // `cfg(doc)`. This is an ad-hoc implementation of attribute privacy.
-#[cfg_attr(not(doc), repr(transparent))]
-#[allow(clippy::derived_hash_with_manual_eq)]
+#[repr(transparent)]
 pub struct CStr {
     // FIXME: this should not be represented with a DST slice but rather with
     //        just a raw `c_char` along with some form of marker to make
@@ -241,22 +243,20 @@ impl CStr {
     ///
     /// # Examples
     ///
-    /// ```ignore (extern-declaration)
+    /// ```
     /// use std::ffi::{c_char, CStr};
     ///
-    /// extern "C" {
-    ///     fn my_string() -> *const c_char;
+    /// fn my_string() -> *const c_char {
+    ///     c"hello".as_ptr()
     /// }
     ///
     /// unsafe {
     ///     let slice = CStr::from_ptr(my_string());
-    ///     println!("string returned: {}", slice.to_str().unwrap());
+    ///     assert_eq!(slice.to_str().unwrap(), "hello");
     /// }
     /// ```
     ///
     /// ```
-    /// #![feature(const_cstr_from_ptr)]
-    ///
     /// use std::ffi::{c_char, CStr};
     ///
     /// const HELLO_PTR: *const c_char = {
@@ -264,17 +264,19 @@ impl CStr {
     ///     BYTES.as_ptr().cast()
     /// };
     /// const HELLO: &CStr = unsafe { CStr::from_ptr(HELLO_PTR) };
+    ///
+    /// assert_eq!(c"Hello, world!", HELLO);
     /// ```
     ///
     /// [valid]: core::ptr#safety
     #[inline] // inline is necessary for codegen to see strlen.
     #[must_use]
     #[stable(feature = "rust1", since = "1.0.0")]
-    #[rustc_const_unstable(feature = "const_cstr_from_ptr", issue = "113219")]
+    #[rustc_const_stable(feature = "const_cstr_from_ptr", since = "1.81.0")]
     pub const unsafe fn from_ptr<'a>(ptr: *const c_char) -> &'a CStr {
         // SAFETY: The caller has provided a pointer that points to a valid C
         // string with a NUL terminator less than `isize::MAX` from `ptr`.
-        let len = unsafe { const_strlen(ptr) };
+        let len = unsafe { strlen(ptr) };
 
         // SAFETY: The caller has provided a valid pointer with length less than
         // `isize::MAX`, so `from_raw_parts` is safe. The content remains valid
@@ -505,7 +507,10 @@ impl CStr {
     #[inline]
     #[must_use]
     const fn as_non_null_ptr(&self) -> NonNull<c_char> {
-        NonNull::from(&self.inner).as_non_null_ptr()
+        // FIXME(effects) replace with `NonNull::from`
+        // SAFETY: a reference is never null
+        unsafe { NonNull::new_unchecked(&self.inner as *const [c_char] as *mut [c_char]) }
+            .as_non_null_ptr()
     }
 
     /// Returns the length of `self`. Like C's `strlen`, this does not include the nul terminator.
@@ -517,8 +522,6 @@ impl CStr {
     /// # Examples
     ///
     /// ```
-    /// #![feature(cstr_count_bytes)]
-    ///
     /// use std::ffi::CStr;
     ///
     /// let cstr = CStr::from_bytes_with_nul(b"foo\0").unwrap();
@@ -530,8 +533,8 @@ impl CStr {
     #[inline]
     #[must_use]
     #[doc(alias("len", "strlen"))]
-    #[unstable(feature = "cstr_count_bytes", issue = "114441")]
-    #[rustc_const_unstable(feature = "const_cstr_from_ptr", issue = "113219")]
+    #[stable(feature = "cstr_count_bytes", since = "1.79.0")]
+    #[rustc_const_stable(feature = "const_cstr_from_ptr", since = "1.81.0")]
     pub const fn count_bytes(&self) -> usize {
         self.inner.len() - 1
     }
@@ -551,6 +554,7 @@ impl CStr {
     ///
     /// let empty_cstr = CStr::from_bytes_with_nul(b"\0")?;
     /// assert!(empty_cstr.is_empty());
+    /// assert!(c"".is_empty());
     /// # Ok(())
     /// # }
     /// ```
@@ -668,15 +672,9 @@ impl CStr {
     }
 }
 
-#[stable(feature = "rust1", since = "1.0.0")]
-impl PartialEq for CStr {
-    #[inline]
-    fn eq(&self, other: &CStr) -> bool {
-        self.to_bytes().eq(other.to_bytes())
-    }
-}
-#[stable(feature = "rust1", since = "1.0.0")]
-impl Eq for CStr {}
+// `.to_bytes()` representations are compared instead of the inner `[c_char]`s,
+// because `c_char` is `i8` (not `u8`) on some platforms.
+// That is why this is implemented manually and not derived.
 #[stable(feature = "rust1", since = "1.0.0")]
 impl PartialOrd for CStr {
     #[inline]
@@ -730,7 +728,10 @@ impl AsRef<CStr> for CStr {
 /// The pointer must point to a valid buffer that contains a NUL terminator. The NUL must be
 /// located within `isize::MAX` from `ptr`.
 #[inline]
-const unsafe fn const_strlen(ptr: *const c_char) -> usize {
+#[unstable(feature = "cstr_internals", issue = "none")]
+#[rustc_const_stable(feature = "const_cstr_from_ptr", since = "1.81.0")]
+#[rustc_allow_const_fn_unstable(const_eval_select)]
+const unsafe fn strlen(ptr: *const c_char) -> usize {
     const fn strlen_ct(s: *const c_char) -> usize {
         let mut len = 0;
 
@@ -768,8 +769,15 @@ const unsafe fn const_strlen(ptr: *const c_char) -> usize {
 pub struct Bytes<'a> {
     // since we know the string is nul-terminated, we only need one pointer
     ptr: NonNull<u8>,
-    phantom: PhantomData<&'a u8>,
+    phantom: PhantomData<&'a [c_char]>,
 }
+
+#[unstable(feature = "cstr_bytes", issue = "112115")]
+unsafe impl Send for Bytes<'_> {}
+
+#[unstable(feature = "cstr_bytes", issue = "112115")]
+unsafe impl Sync for Bytes<'_> {}
+
 impl<'a> Bytes<'a> {
     #[inline]
     fn new(s: &'a CStr) -> Self {
@@ -802,7 +810,7 @@ impl Iterator for Bytes<'_> {
             if ret == 0 {
                 None
             } else {
-                self.ptr = self.ptr.offset(1);
+                self.ptr = self.ptr.add(1);
                 Some(ret)
             }
         }
@@ -811,6 +819,12 @@ impl Iterator for Bytes<'_> {
     #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         if self.is_empty() { (0, Some(0)) } else { (1, None) }
+    }
+
+    #[inline]
+    fn count(self) -> usize {
+        // SAFETY: We always hold a valid pointer to a C string
+        unsafe { strlen(self.ptr.as_ptr().cast()) }
     }
 }
 

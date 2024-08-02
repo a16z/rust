@@ -12,10 +12,15 @@ rust-version.workspace = true
 doctest = false
 
 [dependencies]
-smol_str.workspace = true
+arrayvec.workspace = true
 text-size.workspace = true
 
 stdx.workspace = true
+intern.workspace = true
+ra-ap-rustc_lexer.workspace = true
+
+[features]
+in-rust-tree = []
 
 [lints]
 workspace = true

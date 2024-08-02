@@ -1,4 +1,4 @@
-#![feature(coroutines, coroutine_trait)]
+#![feature(coroutines, coroutine_trait, stmt_expr_attributes)]
 
 use std::ops::{Coroutine, CoroutineState};
 use std::pin::Pin;
@@ -10,15 +10,16 @@ use std::pin::Pin;
 // to handle this condition, and still report dead block coverage.
 fn get_u32(val: bool) -> Result<u32, String> {
     if val {
-        Ok(1)
+        Ok(1) //
     } else {
-        Err(String::from("some error"))
+        Err(String::from("some error")) //
     }
 }
 
 fn main() {
     let is_true = std::env::args().len() == 1;
-    let mut coroutine = || {
+    let mut coroutine = #[coroutine]
+    || {
         yield get_u32(is_true);
         return "foo";
     };

@@ -1,18 +1,14 @@
-//! rustbuild, the Rust build system
+//! bootstrap, the Rust build system
 //!
 //! This is the entry point for the build system used to compile the `rustc`
 //! compiler. Lots of documentation can be found in the `README.md` file in the
 //! parent directory, and otherwise documentation can be found throughout the `build`
 //! directory in each respective module.
 
-use std::io::Write;
-use std::process;
+use std::fs::{self, OpenOptions};
+use std::io::{self, BufRead, BufReader, IsTerminal, Write};
 use std::str::FromStr;
-use std::{
-    env,
-    fs::{self, OpenOptions},
-    io::{self, BufRead, BufReader, IsTerminal},
-};
+use std::{env, process};
 
 use bootstrap::{
     find_recent_config_change_ids, human_readable_changes, t, Build, Config, Subcommand,
@@ -30,13 +26,11 @@ fn main() {
         // Display PID of process holding the lock
         // PID will be stored in a lock file
         let lock_path = config.out.join("lock");
-        let pid = match fs::read_to_string(&lock_path) {
-            Ok(contents) => contents,
-            Err(_) => String::new(),
-        };
+        let pid = fs::read_to_string(&lock_path).unwrap_or_default();
 
         build_lock = fd_lock::RwLock::new(t!(fs::OpenOptions::new()
             .write(true)
+            .truncate(true)
             .create(true)
             .open(&lock_path)));
         _build_lock_guard = match build_lock.try_write() {
@@ -131,10 +125,6 @@ fn main() {
 fn check_version(config: &Config) -> Option<String> {
     let mut msg = String::new();
 
-    if config.changelog_seen.is_some() {
-        msg.push_str("WARNING: The use of `changelog-seen` is deprecated. Please refer to `change-id` option in `config.example.toml` instead.\n");
-    }
-
     let latest_change_id = CONFIG_CHANGE_HISTORY.last().unwrap().change_id;
     let warned_id_path = config.out.join("bootstrap").join(".last-warned-change-id");
 
@@ -147,8 +137,8 @@ fn check_version(config: &Config) -> Option<String> {
         // then use the one from the config.toml. This way we never show the same warnings
         // more than once.
         if let Ok(t) = fs::read_to_string(&warned_id_path) {
-            let last_warned_id =
-                usize::from_str(&t).expect(&format!("{} is corrupted.", warned_id_path.display()));
+            let last_warned_id = usize::from_str(&t)
+                .unwrap_or_else(|_| panic!("{} is corrupted.", warned_id_path.display()));
 
             // We only use the last_warned_id if it exists in `CONFIG_CHANGE_HISTORY`.
             // Otherwise, we may retrieve all the changes if it's not the highest value.

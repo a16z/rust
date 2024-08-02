@@ -8,15 +8,15 @@
 //! In this case we try to build an abstract representation of this constant using
 //! `thir_abstract_const` which can then be checked for structural equality with other
 //! generic constants mentioned in the `caller_bounds` of the current environment.
+
 use rustc_hir::def::DefKind;
 use rustc_infer::infer::InferCtxt;
+use rustc_middle::bug;
 use rustc_middle::mir::interpret::ErrorHandled;
-
 use rustc_middle::traits::ObligationCause;
 use rustc_middle::ty::abstract_const::NotConstEvaluatable;
 use rustc_middle::ty::{self, TyCtxt, TypeVisitable, TypeVisitableExt, TypeVisitor};
-
-use rustc_span::Span;
+use rustc_span::{Span, DUMMY_SP};
 
 use crate::traits::ObligationCtxt;
 
@@ -34,7 +34,7 @@ pub fn is_const_evaluatable<'tcx>(
         ty::ConstKind::Param(_)
         | ty::ConstKind::Bound(_, _)
         | ty::ConstKind::Placeholder(_)
-        | ty::ConstKind::Value(_)
+        | ty::ConstKind::Value(_, _)
         | ty::ConstKind::Error(_) => return Ok(()),
         ty::ConstKind::Infer(_) => return Err(NotConstEvaluatable::MentionsInfer),
     };
@@ -116,12 +116,12 @@ pub fn is_const_evaluatable<'tcx>(
                 tcx.dcx()
                     .struct_span_fatal(
                         // Slightly better span than just using `span` alone
-                        if span == rustc_span::DUMMY_SP { tcx.def_span(uv.def) } else { span },
+                        if span == DUMMY_SP { tcx.def_span(uv.def) } else { span },
                         "failed to evaluate generic const expression",
                     )
                     .with_note("the crate this constant originates from uses `#![feature(generic_const_exprs)]`")
                     .with_span_suggestion_verbose(
-                        rustc_span::DUMMY_SP,
+                        DUMMY_SP,
                         "consider enabling this feature",
                         "#![feature(generic_const_exprs)]\n",
                         rustc_errors::Applicability::MaybeIncorrect,
@@ -173,8 +173,7 @@ fn satisfied_from_param_env<'tcx>(
             debug!("is_const_evaluatable: candidate={:?}", c);
             if self.infcx.probe(|_| {
                 let ocx = ObligationCtxt::new(self.infcx);
-                ocx.eq(&ObligationCause::dummy(), self.param_env, c.ty(), self.ct.ty()).is_ok()
-                    && ocx.eq(&ObligationCause::dummy(), self.param_env, c, self.ct).is_ok()
+                ocx.eq(&ObligationCause::dummy(), self.param_env, c, self.ct).is_ok()
                     && ocx.select_all_or_error().is_empty()
             }) {
                 self.single_match = match self.single_match {
@@ -215,7 +214,6 @@ fn satisfied_from_param_env<'tcx>(
 
     if let Some(Ok(c)) = single_match {
         let ocx = ObligationCtxt::new(infcx);
-        assert!(ocx.eq(&ObligationCause::dummy(), param_env, c.ty(), ct.ty()).is_ok());
         assert!(ocx.eq(&ObligationCause::dummy(), param_env, c, ct).is_ok());
         assert!(ocx.select_all_or_error().is_empty());
         return true;

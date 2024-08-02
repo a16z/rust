@@ -1,26 +1,28 @@
 #[cfg(test)]
 mod tests;
 
-use crate::cmp;
-use crate::fmt;
+use crate::ffi::{c_int, c_void};
 use crate::io::{self, BorrowedCursor, ErrorKind, IoSlice, IoSliceMut};
-use crate::mem;
 use crate::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr};
-use crate::ptr;
 use crate::sys::common::small_c_string::run_with_cstr;
-use crate::sys::net::netc as c;
-use crate::sys::net::{cvt, cvt_gai, cvt_r, init, wrlen_t, Socket};
+use crate::sys::net::{cvt, cvt_gai, cvt_r, init, netc as c, wrlen_t, Socket};
 use crate::sys_common::{AsInner, FromInner, IntoInner};
 use crate::time::Duration;
-
-use crate::ffi::{c_int, c_void};
+use crate::{cmp, fmt, mem, ptr};
 
 cfg_if::cfg_if! {
     if #[cfg(any(
-        target_os = "dragonfly", target_os = "freebsd",
-        target_os = "ios", target_os = "tvos", target_os = "macos", target_os = "watchos", target_os = "visionos",
-        target_os = "openbsd", target_os = "netbsd", target_os = "illumos",
-        target_os = "solaris", target_os = "haiku", target_os = "l4re", target_os = "nto"))] {
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "openbsd",
+        target_os = "netbsd",
+        target_os = "illumos",
+        target_os = "solaris",
+        target_os = "haiku",
+        target_os = "l4re",
+        target_os = "nto",
+        target_vendor = "apple",
+    ))] {
         use crate::sys::net::netc::IPV6_JOIN_GROUP as IPV6_ADD_MEMBERSHIP;
         use crate::sys::net::netc::IPV6_LEAVE_GROUP as IPV6_DROP_MEMBERSHIP;
     } else {
@@ -35,6 +37,7 @@ cfg_if::cfg_if! {
         target_os = "hurd",
         target_os = "dragonfly", target_os = "freebsd",
         target_os = "openbsd", target_os = "netbsd",
+        target_os = "solaris", target_os = "illumos",
         target_os = "haiku", target_os = "nto"))] {
         use libc::MSG_NOSIGNAL;
     } else {
@@ -417,6 +420,10 @@ impl TcpListener {
                 // it allows up to about 37, but other times it doesn't even
                 // accept 32. There may be a global limitation causing this.
                 let backlog = 20;
+            } else if #[cfg(target_os = "haiku")] {
+                // Haiku does not support a queue length > 32
+                // https://github.com/haiku/haiku/blob/979a0bc487864675517fb2fab28f87dc8bf43041/headers/posix/sys/socket.h#L81
+                let backlog = 32;
             } else {
                 // The default for all other platforms
                 let backlog = 128;

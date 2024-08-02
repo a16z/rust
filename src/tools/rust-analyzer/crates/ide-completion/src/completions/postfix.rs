@@ -2,13 +2,14 @@
 
 mod format_like;
 
-use hir::ItemInNs;
+use hir::{ImportPathConfig, ItemInNs};
 use ide_db::{
     documentation::{Documentation, HasDocs},
     imports::insert_use::ImportScope,
     ty_filter::TryEnum,
     SnippetCap,
 };
+use stdx::never;
 use syntax::{
     ast::{self, make, AstNode, AstToken},
     SyntaxKind::{BLOCK_EXPR, EXPR_STMT, FOR_EXPR, IF_EXPR, LOOP_EXPR, STMT_LIST, WHILE_EXPR},
@@ -59,15 +60,18 @@ pub(crate) fn complete_postfix(
         None => return,
     };
 
+    let cfg = ImportPathConfig {
+        prefer_no_std: ctx.config.prefer_no_std,
+        prefer_prelude: ctx.config.prefer_prelude,
+        prefer_absolute: ctx.config.prefer_absolute,
+    };
+
     if let Some(drop_trait) = ctx.famous_defs().core_ops_Drop() {
         if receiver_ty.impls_trait(ctx.db, drop_trait, &[]) {
             if let Some(drop_fn) = ctx.famous_defs().core_mem_drop() {
-                if let Some(path) = ctx.module.find_use_path(
-                    ctx.db,
-                    ItemInNs::Values(drop_fn.into()),
-                    ctx.config.prefer_no_std,
-                    ctx.config.prefer_prelude,
-                ) {
+                if let Some(path) =
+                    ctx.module.find_path(ctx.db, ItemInNs::Values(drop_fn.into()), cfg)
+                {
                     cov_mark::hit!(postfix_drop_completion);
                     let mut item = postfix_snippet(
                         "drop",
@@ -319,7 +323,9 @@ fn build_postfix_snippet_builder<'ctx>(
 ) -> Option<impl Fn(&str, &str, &str) -> Builder + 'ctx> {
     let receiver_range = ctx.sema.original_range_opt(receiver.syntax())?.range;
     if ctx.source_range().end() < receiver_range.start() {
-        // This shouldn't happen, yet it does. I assume this might be due to an incorrect token mapping.
+        // This shouldn't happen, yet it does. I assume this might be due to an incorrect token
+        // mapping.
+        never!();
         return None;
     }
     let delete_range = TextRange::new(receiver_range.start(), ctx.source_range().end());
@@ -663,7 +669,7 @@ fn main() {
         check_edit(
             "unsafe",
             r#"fn main() { let x = true else {panic!()}.$0}"#,
-            r#"fn main() { let x = true else {panic!()}.unsafe}"#,
+            r#"fn main() { let x = true else {panic!()}.unsafe $0}"#,
         );
     }
 

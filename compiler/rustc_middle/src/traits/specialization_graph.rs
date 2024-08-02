@@ -1,11 +1,13 @@
+use rustc_data_structures::fx::FxIndexMap;
+use rustc_errors::ErrorGuaranteed;
+use rustc_hir::def_id::{DefId, DefIdMap};
+use rustc_macros::{HashStable, TyDecodable, TyEncodable};
+use rustc_span::symbol::sym;
+
 use crate::error::StrictCoherenceNeedsNegativeCoherence;
 use crate::ty::fast_reject::SimplifiedType;
 use crate::ty::visit::TypeVisitableExt;
 use crate::ty::{self, TyCtxt};
-use rustc_data_structures::fx::FxIndexMap;
-use rustc_errors::ErrorGuaranteed;
-use rustc_hir::def_id::{DefId, DefIdMap};
-use rustc_span::symbol::sym;
 
 /// A per-trait graph of impls in specialization order. At the moment, this
 /// graph forms a tree rooted with the trait itself, with all other nodes

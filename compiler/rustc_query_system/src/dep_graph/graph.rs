@@ -1,12 +1,3 @@
-use rustc_data_structures::fingerprint::Fingerprint;
-use rustc_data_structures::fx::{FxHashMap, FxHashSet};
-use rustc_data_structures::profiling::{QueryInvocationId, SelfProfilerRef};
-use rustc_data_structures::sharded::{self, Sharded};
-use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
-use rustc_data_structures::sync::{AtomicU32, AtomicU64, Lock, Lrc};
-use rustc_data_structures::unord::UnordMap;
-use rustc_index::IndexVec;
-use rustc_serialize::opaque::{FileEncodeResult, FileEncoder};
 use std::assert_matches::assert_matches;
 use std::collections::hash_map::Entry;
 use std::fmt::Debug;
@@ -15,15 +6,26 @@ use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
+use rustc_data_structures::fingerprint::Fingerprint;
+use rustc_data_structures::fx::{FxHashMap, FxHashSet};
+use rustc_data_structures::profiling::{QueryInvocationId, SelfProfilerRef};
+use rustc_data_structures::sharded::{self, Sharded};
+use rustc_data_structures::stable_hasher::{HashStable, StableHasher};
+use rustc_data_structures::sync::{AtomicU32, AtomicU64, Lock, Lrc};
+use rustc_data_structures::unord::UnordMap;
+use rustc_index::IndexVec;
+use rustc_macros::{Decodable, Encodable};
+use rustc_serialize::opaque::{FileEncodeResult, FileEncoder};
+use tracing::{debug, instrument};
+#[cfg(debug_assertions)]
+use {super::debug::EdgeFilter, std::env};
+
 use super::query::DepGraphQuery;
 use super::serialized::{GraphEncoder, SerializedDepGraph, SerializedDepNodeIndex};
 use super::{DepContext, DepKind, DepNode, Deps, HasDepContext, WorkProductId};
 use crate::dep_graph::edges::EdgesVec;
 use crate::ich::StableHashingContext;
 use crate::query::{QueryContext, QuerySideEffects};
-
-#[cfg(debug_assertions)]
-use {super::debug::EdgeFilter, std::env};
 
 #[derive(Clone)]
 pub struct DepGraph<D: Deps> {
@@ -39,6 +41,11 @@ pub struct DepGraph<D: Deps> {
 rustc_index::newtype_index! {
     pub struct DepNodeIndex {}
 }
+
+// We store a large collection of these in `prev_index_to_index` during
+// non-full incremental builds, and want to ensure that the element size
+// doesn't inadvertently increase.
+rustc_data_structures::static_assert_size!(Option<DepNodeIndex>, 4);
 
 impl DepNodeIndex {
     const SINGLETON_DEPENDENCYLESS_ANON_NODE: DepNodeIndex = DepNodeIndex::ZERO;
@@ -57,7 +64,6 @@ pub struct MarkFrame<'a> {
     parent: Option<&'a MarkFrame<'a>>,
 }
 
-#[derive(PartialEq)]
 enum DepNodeColor {
     Red,
     Green(DepNodeIndex),
@@ -459,7 +465,8 @@ impl<D: Deps> DepGraph<D> {
                     }
                     TaskDepsRef::Ignore => return,
                     TaskDepsRef::Forbid => {
-                        panic!("Illegal read of: {dep_node_index:?}")
+                        // Reading is forbidden in this context. ICE with a useful error message.
+                        panic_on_forbidden_read(data, dep_node_index)
                     }
                 };
                 let task_deps = &mut *task_deps;
@@ -917,7 +924,7 @@ impl<D: Deps> DepGraph<D> {
     /// Returns true if the given node has been marked as red during the
     /// current compilation session. Used in various assertions
     pub fn is_red(&self, dep_node: &DepNode) -> bool {
-        self.node_color(dep_node) == Some(DepNodeColor::Red)
+        matches!(self.node_color(dep_node), Some(DepNodeColor::Red))
     }
 
     /// Returns true if the given node has been marked as green during the
@@ -1104,11 +1111,6 @@ impl<D: Deps> CurrentDepGraph<D> {
             },
             Err(_) => None,
         };
-
-        // We store a large collection of these in `prev_index_to_index` during
-        // non-full incremental builds, and want to ensure that the element size
-        // doesn't inadvertently increase.
-        static_assert_size!(Option<DepNodeIndex>, 4);
 
         let new_node_count_estimate = 102 * prev_graph_node_count / 100 + 200;
 
@@ -1365,4 +1367,46 @@ pub(crate) fn print_markframe_trace<D: Deps>(graph: &DepGraph<D>, frame: Option<
     }
 
     eprintln!("end of try_mark_green dep node stack");
+}
+
+#[cold]
+#[inline(never)]
+fn panic_on_forbidden_read<D: Deps>(data: &DepGraphData<D>, dep_node_index: DepNodeIndex) -> ! {
+    // We have to do an expensive reverse-lookup of the DepNode that
+    // corresponds to `dep_node_index`, but that's OK since we are about
+    // to ICE anyway.
+    let mut dep_node = None;
+
+    // First try to find the dep node among those that already existed in the
+    // previous session
+    for (prev_index, index) in data.current.prev_index_to_index.lock().iter_enumerated() {
+        if index == &Some(dep_node_index) {
+            dep_node = Some(data.previous.index_to_node(prev_index));
+            break;
+        }
+    }
+
+    if dep_node.is_none() {
+        // Try to find it among the new nodes
+        for shard in data.current.new_node_to_index.lock_shards() {
+            if let Some((node, _)) = shard.iter().find(|(_, index)| **index == dep_node_index) {
+                dep_node = Some(*node);
+                break;
+            }
+        }
+    }
+
+    let dep_node = dep_node.map_or_else(
+        || format!("with index {:?}", dep_node_index),
+        |dep_node| format!("`{:?}`", dep_node),
+    );
+
+    panic!(
+        "Error: trying to record dependency on DepNode {dep_node} in a \
+         context that does not allow it (e.g. during query deserialization). \
+         The most common case of recording a dependency on a DepNode `foo` is \
+         when the correspondng query `foo` is invoked. Invoking queries is not \
+         allowed as part of loading something from the incremental on-disk cache. \
+         See <https://github.com/rust-lang/rust/pull/91919>."
+    )
 }

@@ -1,15 +1,15 @@
-use self::WhichLine::*;
-
 use std::fmt;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::BufReader;
 use std::path::Path;
 use std::str::FromStr;
+use std::sync::OnceLock;
 
-use once_cell::sync::Lazy;
 use regex::Regex;
 use tracing::*;
+
+use self::WhichLine::*;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum ErrorKind {
@@ -55,6 +55,18 @@ pub struct Error {
     /// `None` if not specified or unknown message kind.
     pub kind: Option<ErrorKind>,
     pub msg: String,
+}
+
+impl Error {
+    pub fn render_for_expected(&self) -> String {
+        use colored::Colorize;
+        format!(
+            "{: <10}line {: >3}: {}",
+            self.kind.map(|kind| kind.to_string()).unwrap_or_default().to_uppercase(),
+            self.line_num,
+            self.msg.cyan(),
+        )
+    }
 }
 
 #[derive(PartialEq, Debug)]
@@ -117,10 +129,11 @@ fn parse_expected(
     //     //~^^^^^
     //     //[rev1]~
     //     //[rev1,rev2]~^^
-    static RE: Lazy<Regex> =
-        Lazy::new(|| Regex::new(r"//(?:\[(?P<revs>[\w,]+)])?~(?P<adjust>\||\^*)").unwrap());
+    static RE: OnceLock<Regex> = OnceLock::new();
 
-    let captures = RE.captures(line)?;
+    let captures = RE
+        .get_or_init(|| Regex::new(r"//(?:\[(?P<revs>[\w\-,]+)])?~(?P<adjust>\||\^*)").unwrap())
+        .captures(line)?;
 
     match (test_revision, captures.name("revs")) {
         // Only error messages that contain our revision between the square brackets apply to us.
@@ -178,3 +191,6 @@ fn parse_expected(
     );
     Some((which, Error { line_num, kind, msg }))
 }
+
+#[cfg(test)]
+mod tests;

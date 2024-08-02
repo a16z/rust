@@ -12,11 +12,6 @@ pub fn hashmap_random_keys() -> (u64, u64) {
 
 #[cfg(all(
     unix,
-    not(target_os = "macos"),
-    not(target_os = "ios"),
-    not(target_os = "tvos"),
-    not(target_os = "watchos"),
-    not(target_os = "visionos"),
     not(target_os = "openbsd"),
     not(target_os = "netbsd"),
     not(target_os = "fuchsia"),
@@ -24,11 +19,11 @@ pub fn hashmap_random_keys() -> (u64, u64) {
     not(target_os = "vxworks"),
     not(target_os = "emscripten"),
     not(target_os = "vita"),
+    not(target_vendor = "apple"),
 ))]
 mod imp {
     use crate::fs::File;
     use crate::io::Read;
-
     #[cfg(any(target_os = "linux", target_os = "android"))]
     use crate::sys::weak::syscall;
 
@@ -63,7 +58,14 @@ mod imp {
         unsafe { getrandom(buf.as_mut_ptr().cast(), buf.len(), libc::GRND_NONBLOCK) }
     }
 
-    #[cfg(any(target_os = "espidf", target_os = "horizon", target_os = "freebsd", netbsd10))]
+    #[cfg(any(
+        target_os = "espidf",
+        target_os = "horizon",
+        target_os = "freebsd",
+        netbsd10,
+        target_os = "illumos",
+        target_os = "solaris"
+    ))]
     fn getrandom(buf: &mut [u8]) -> libc::ssize_t {
         unsafe { libc::getrandom(buf.as_mut_ptr().cast(), buf.len(), 0) }
     }
@@ -87,6 +89,8 @@ mod imp {
         target_os = "horizon",
         target_os = "freebsd",
         target_os = "dragonfly",
+        target_os = "solaris",
+        target_os = "illumos",
         netbsd10
     )))]
     fn getrandom_fill_bytes(_buf: &mut [u8]) -> bool {
@@ -100,6 +104,8 @@ mod imp {
         target_os = "horizon",
         target_os = "freebsd",
         target_os = "dragonfly",
+        target_os = "solaris",
+        target_os = "illumos",
         netbsd10
     ))]
     fn getrandom_fill_bytes(v: &mut [u8]) -> bool {
@@ -171,8 +177,9 @@ mod imp {
 
 #[cfg(target_vendor = "apple")]
 mod imp {
-    use crate::io;
     use libc::{c_int, c_void, size_t};
+
+    use crate::io;
 
     #[inline(always)]
     fn random_failure() -> ! {
@@ -304,8 +311,10 @@ mod imp {
 
 #[cfg(target_os = "vxworks")]
 mod imp {
+    use core::sync::atomic::AtomicBool;
+    use core::sync::atomic::Ordering::Relaxed;
+
     use crate::io;
-    use core::sync::atomic::{AtomicBool, Ordering::Relaxed};
 
     pub fn fill_bytes(v: &mut [u8]) {
         static RNG_INIT: AtomicBool = AtomicBool::new(false);

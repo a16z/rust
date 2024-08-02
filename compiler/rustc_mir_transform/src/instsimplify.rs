@@ -1,19 +1,37 @@
 //! Performs various peephole optimizations.
 
-use crate::simplify::simplify_duplicate_switch_targets;
 use rustc_ast::attr;
+use rustc_hir::LangItem;
+use rustc_middle::bug;
 use rustc_middle::mir::*;
-use rustc_middle::ty::layout;
 use rustc_middle::ty::layout::ValidityRequirement;
-use rustc_middle::ty::{self, GenericArgsRef, ParamEnv, Ty, TyCtxt};
+use rustc_middle::ty::{self, layout, GenericArgsRef, ParamEnv, Ty, TyCtxt};
 use rustc_span::sym;
 use rustc_span::symbol::Symbol;
-use rustc_target::abi::FieldIdx;
 use rustc_target::spec::abi::Abi;
 
-pub struct InstSimplify;
+use crate::simplify::simplify_duplicate_switch_targets;
+use crate::take_array;
+
+pub enum InstSimplify {
+    BeforeInline,
+    AfterSimplifyCfg,
+}
+
+impl InstSimplify {
+    pub fn name(&self) -> &'static str {
+        match self {
+            InstSimplify::BeforeInline => "InstSimplify-before-inline",
+            InstSimplify::AfterSimplifyCfg => "InstSimplify-after-simplifycfg",
+        }
+    }
+}
 
 impl<'tcx> MirPass<'tcx> for InstSimplify {
+    fn name(&self) -> &'static str {
+        self.name()
+    }
+
     fn is_enabled(&self, sess: &rustc_session::Session) -> bool {
         sess.mir_opt_level() > 0
     }
@@ -36,6 +54,7 @@ impl<'tcx> MirPass<'tcx> for InstSimplify {
                         ctx.simplify_bool_cmp(&statement.source_info, rvalue);
                         ctx.simplify_ref_deref(&statement.source_info, rvalue);
                         ctx.simplify_len(&statement.source_info, rvalue);
+                        ctx.simplify_ptr_aggregate(&statement.source_info, rvalue);
                         ctx.simplify_cast(rvalue);
                     }
                     _ => {}
@@ -58,8 +77,17 @@ struct InstSimplifyContext<'tcx, 'a> {
 
 impl<'tcx> InstSimplifyContext<'tcx, '_> {
     fn should_simplify(&self, source_info: &SourceInfo, rvalue: &Rvalue<'tcx>) -> bool {
+        self.should_simplify_custom(source_info, "Rvalue", rvalue)
+    }
+
+    fn should_simplify_custom(
+        &self,
+        source_info: &SourceInfo,
+        label: &str,
+        value: impl std::fmt::Debug,
+    ) -> bool {
         self.tcx.consider_optimizing(|| {
-            format!("InstSimplify - Rvalue: {rvalue:?} SourceInfo: {source_info:?}")
+            format!("InstSimplify - {label}: {value:?} SourceInfo: {source_info:?}")
         })
     }
 
@@ -111,9 +139,9 @@ impl<'tcx> InstSimplifyContext<'tcx, '_> {
         if a.const_.ty().is_bool() { a.const_.try_to_bool() } else { None }
     }
 
-    /// Transform "&(*a)" ==> "a".
+    /// Transform `&(*a)` ==> `a`.
     fn simplify_ref_deref(&self, source_info: &SourceInfo, rvalue: &mut Rvalue<'tcx>) {
-        if let Rvalue::Ref(_, _, place) = rvalue {
+        if let Rvalue::Ref(_, _, place) | Rvalue::AddressOf(_, place) = rvalue {
             if let Some((base, ProjectionElem::Deref)) = place.as_ref().last_projection() {
                 if rvalue.ty(self.local_decls, self.tcx) != base.ty(self.local_decls, self.tcx).ty {
                     return;
@@ -131,7 +159,7 @@ impl<'tcx> InstSimplifyContext<'tcx, '_> {
         }
     }
 
-    /// Transform "Len([_; N])" ==> "N".
+    /// Transform `Len([_; N])` ==> `N`.
     fn simplify_len(&self, source_info: &SourceInfo, rvalue: &mut Rvalue<'tcx>) {
         if let Rvalue::Len(ref place) = *rvalue {
             let place_ty = place.ty(self.local_decls, self.tcx).ty;
@@ -140,9 +168,33 @@ impl<'tcx> InstSimplifyContext<'tcx, '_> {
                     return;
                 }
 
-                let const_ = Const::from_ty_const(len, self.tcx);
+                let const_ = Const::from_ty_const(len, self.tcx.types.usize, self.tcx);
                 let constant = ConstOperand { span: source_info.span, const_, user_ty: None };
                 *rvalue = Rvalue::Use(Operand::Constant(Box::new(constant)));
+            }
+        }
+    }
+
+    /// Transform `Aggregate(RawPtr, [p, ()])` ==> `Cast(PtrToPtr, p)`.
+    fn simplify_ptr_aggregate(&self, source_info: &SourceInfo, rvalue: &mut Rvalue<'tcx>) {
+        if let Rvalue::Aggregate(box AggregateKind::RawPtr(pointee_ty, mutability), fields) = rvalue
+        {
+            let meta_ty = fields.raw[1].ty(self.local_decls, self.tcx);
+            if meta_ty.is_unit() {
+                // The mutable borrows we're holding prevent printing `rvalue` here
+                if !self.should_simplify_custom(
+                    source_info,
+                    "Aggregate::RawPtr",
+                    (&pointee_ty, *mutability, &fields),
+                ) {
+                    return;
+                }
+
+                let mut fields = std::mem::take(fields);
+                let _meta = fields.pop().unwrap();
+                let data = fields.pop().unwrap();
+                let ptr_ty = Ty::new_ptr(self.tcx, *pointee_ty, *mutability);
+                *rvalue = Rvalue::Cast(CastKind::PtrToPtr, data, ptr_ty);
             }
         }
     }
@@ -182,13 +234,11 @@ impl<'tcx> InstSimplifyContext<'tcx, '_> {
                     && let Some(place) = operand.place()
                 {
                     let variant = adt_def.non_enum_variant();
-                    for (i, field) in variant.fields.iter().enumerate() {
+                    for (i, field) in variant.fields.iter_enumerated() {
                         let field_ty = field.ty(self.tcx, args);
                         if field_ty == *cast_ty {
-                            let place = place.project_deeper(
-                                &[ProjectionElem::Field(FieldIdx::from_usize(i), *cast_ty)],
-                                self.tcx,
-                            );
+                            let place = place
+                                .project_deeper(&[ProjectionElem::Field(i, *cast_ty)], self.tcx);
                             let operand = if operand.is_move() {
                                 Operand::Move(place)
                             } else {
@@ -238,8 +288,7 @@ impl<'tcx> InstSimplifyContext<'tcx, '_> {
             return;
         }
 
-        let trait_def_id = self.tcx.trait_of_item(fn_def_id);
-        if trait_def_id.is_none() || trait_def_id != self.tcx.lang_items().clone_trait() {
+        if !self.tcx.is_lang_item(fn_def_id, LangItem::CloneFn) {
             return;
         }
 
@@ -253,7 +302,8 @@ impl<'tcx> InstSimplifyContext<'tcx, '_> {
             return;
         }
 
-        let Some(arg_place) = args.pop().unwrap().node.place() else { return };
+        let Ok([arg]) = take_array(args) else { return };
+        let Some(arg_place) = arg.node.place() else { return };
 
         statements.push(Statement {
             source_info: terminator.source_info,

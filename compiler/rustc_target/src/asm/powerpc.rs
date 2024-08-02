@@ -1,7 +1,8 @@
-use super::{InlineAsmArch, InlineAsmType, ModifierInfo};
-use rustc_macros::HashStable_Generic;
-use rustc_span::Symbol;
 use std::fmt;
+
+use rustc_span::Symbol;
+
+use super::{InlineAsmArch, InlineAsmType, ModifierInfo};
 
 def_reg_class! {
     PowerPC PowerPCInlineAsmRegClass {

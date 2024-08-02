@@ -1,7 +1,7 @@
-//@ unit-test: InstSimplify
+//@ test-mir-pass: InstSimplify-after-simplifycfg
 // EMIT_MIR_FOR_EACH_PANIC_STRATEGY
 
-// EMIT_MIR combine_clone_of_primitives.{impl#0}-clone.InstSimplify.diff
+// EMIT_MIR combine_clone_of_primitives.{impl#0}-clone.InstSimplify-after-simplifycfg.diff
 #[derive(Clone)]
 struct MyThing<T> {
     v: T,

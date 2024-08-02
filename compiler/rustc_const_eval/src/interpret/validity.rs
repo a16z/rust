@@ -5,17 +5,19 @@
 //! to be const-safe.
 
 use std::fmt::Write;
+use std::hash::Hash;
 use std::num::NonZero;
 
 use either::{Left, Right};
-
 use hir::def::DefKind;
 use rustc_ast::Mutability;
 use rustc_data_structures::fx::FxHashSet;
 use rustc_hir as hir;
+use rustc_middle::bug;
+use rustc_middle::mir::interpret::ValidationErrorKind::{self, *};
 use rustc_middle::mir::interpret::{
     ExpectedKind, InterpError, InvalidMetaKind, Misalignment, PointerKind, Provenance,
-    ValidationErrorInfo, ValidationErrorKind, ValidationErrorKind::*,
+    UnsupportedOpInfo, ValidationErrorInfo,
 };
 use rustc_middle::ty::layout::{LayoutOf, TyAndLayout};
 use rustc_middle::ty::{self, Ty};
@@ -23,16 +25,17 @@ use rustc_span::symbol::{sym, Symbol};
 use rustc_target::abi::{
     Abi, FieldIdx, Scalar as ScalarAbi, Size, VariantIdx, Variants, WrappingRange,
 };
+use tracing::trace;
 
-use std::hash::Hash;
-
+use super::machine::AllocMap;
 use super::{
-    format_interp_error, machine::AllocMap, AllocId, CheckInAllocMsg, GlobalAlloc, ImmTy,
+    err_ub, format_interp_error, throw_ub, AllocId, AllocKind, CheckInAllocMsg, GlobalAlloc, ImmTy,
     Immediate, InterpCx, InterpResult, MPlaceTy, Machine, MemPlaceMeta, OpTy, Pointer, Projectable,
     Scalar, ValueVisitor,
 };
 
 // for the validation errors
+#[rustfmt::skip]
 use super::InterpError::UndefinedBehavior as Ub;
 use super::InterpError::Unsupported as Unsup;
 use super::UndefinedBehaviorInfo::*;
@@ -203,7 +206,7 @@ fn write_path(out: &mut String, path: &[PathElem]) {
     }
 }
 
-struct ValidityVisitor<'rt, 'mir, 'tcx, M: Machine<'mir, 'tcx>> {
+struct ValidityVisitor<'rt, 'tcx, M: Machine<'tcx>> {
     /// The `path` may be pushed to, but the part that is present when a function
     /// starts must not be changed!  `visit_fields` and `visit_array` rely on
     /// this stack discipline.
@@ -211,10 +214,10 @@ struct ValidityVisitor<'rt, 'mir, 'tcx, M: Machine<'mir, 'tcx>> {
     ref_tracking: Option<&'rt mut RefTracking<MPlaceTy<'tcx, M::Provenance>, Vec<PathElem>>>,
     /// `None` indicates this is not validating for CTFE (but for runtime).
     ctfe_mode: Option<CtfeValidationMode>,
-    ecx: &'rt InterpCx<'mir, 'tcx, M>,
+    ecx: &'rt InterpCx<'tcx, M>,
 }
 
-impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, 'tcx, M> {
+impl<'rt, 'tcx, M: Machine<'tcx>> ValidityVisitor<'rt, 'tcx, M> {
     fn aggregate_field_path_elem(&mut self, layout: TyAndLayout<'tcx>, field: usize) -> PathElem {
         // First, check if we are projecting to a variant.
         match layout.variants {
@@ -339,16 +342,18 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
     ) -> InterpResult<'tcx> {
         let tail = self.ecx.tcx.struct_tail_erasing_lifetimes(pointee.ty, self.ecx.param_env);
         match tail.kind() {
-            ty::Dynamic(_, _, ty::Dyn) => {
+            ty::Dynamic(data, _, ty::Dyn) => {
                 let vtable = meta.unwrap_meta().to_pointer(self.ecx)?;
-                // Make sure it is a genuine vtable pointer.
-                let (_ty, _trait) = try_validation!(
-                    self.ecx.get_ptr_vtable(vtable),
+                // Make sure it is a genuine vtable pointer for the right trait.
+                try_validation!(
+                    self.ecx.get_ptr_vtable_ty(vtable, Some(data)),
                     self.path,
-                    Ub(DanglingIntPointer(..) | InvalidVTablePointer(..)) =>
-                        InvalidVTablePtr { value: format!("{vtable}") }
+                    Ub(DanglingIntPointer{ .. } | InvalidVTablePointer(..)) =>
+                        InvalidVTablePtr { value: format!("{vtable}") },
+                    Ub(InvalidVTableTrait { expected_trait, vtable_trait }) => {
+                        InvalidMetaWrongTrait { expected_trait, vtable_trait: *vtable_trait }
+                    },
                 );
-                // FIXME: check if the type/trait match what ty::Dynamic says?
             }
             ty::Slice(..) | ty::Str => {
                 let _len = meta.unwrap_meta().to_target_usize(self.ecx)?;
@@ -400,8 +405,8 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                 CheckInAllocMsg::InboundsTest, // will anyway be replaced by validity message
             ),
             self.path,
-            Ub(DanglingIntPointer(0, _)) => NullPtr { ptr_kind },
-            Ub(DanglingIntPointer(i, _)) => DanglingPtrNoProvenance {
+            Ub(DanglingIntPointer { addr: 0, .. }) => NullPtr { ptr_kind },
+            Ub(DanglingIntPointer { addr: i, .. }) => DanglingPtrNoProvenance {
                 ptr_kind,
                 // FIXME this says "null pointer" when null but we need translate
                 pointer: format!("{}", Pointer::<Option<AllocId>>::from_addr_invalid(*i))
@@ -409,8 +414,6 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
             Ub(PointerOutOfBounds { .. }) => DanglingPtrOutOfBounds {
                 ptr_kind
             },
-            // This cannot happen during const-eval (because interning already detects
-            // dangling pointers), but it can happen in Miri.
             Ub(PointerUseAfterFree(..)) => DanglingPtrUseAfterFree {
                 ptr_kind,
             },
@@ -427,6 +430,11 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                 found_bytes: has.bytes()
             },
         );
+        // Make sure this is non-null. We checked dereferenceability above, but if `size` is zero
+        // that does not imply non-null.
+        if self.ecx.scalar_may_be_null(Scalar::from_maybe_pointer(place.ptr(), self.ecx))? {
+            throw_validation_failure!(self.path, NullPtr { ptr_kind })
+        }
         // Do not allow pointers to uninhabited types.
         if place.layout.abi.is_uninhabited() {
             let ty = place.layout.ty;
@@ -447,73 +455,56 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
             };
             // Proceed recursively even for ZST, no reason to skip them!
             // `!` is a ZST and we want to validate it.
-            if let Ok((alloc_id, _offset, _prov)) = self.ecx.ptr_try_get_alloc_id(place.ptr()) {
+            if let Ok((alloc_id, _offset, _prov)) = self.ecx.ptr_try_get_alloc_id(place.ptr(), 0) {
                 let mut skip_recursive_check = false;
-                // Let's see what kind of memory this points to.
-                // `unwrap` since dangling pointers have already been handled.
-                let alloc_kind = self.ecx.tcx.try_get_global_alloc(alloc_id).unwrap();
-                let alloc_actual_mutbl = match alloc_kind {
-                    GlobalAlloc::Static(did) => {
-                        // Special handling for pointers to statics (irrespective of their type).
-                        assert!(!self.ecx.tcx.is_thread_local_static(did));
-                        assert!(self.ecx.tcx.is_static(did));
-                        // Mode-specific checks
-                        match self.ctfe_mode {
-                            Some(
-                                CtfeValidationMode::Static { .. }
-                                | CtfeValidationMode::Promoted { .. },
-                            ) => {
-                                // We skip recursively checking other statics. These statics must be sound by
-                                // themselves, and the only way to get broken statics here is by using
-                                // unsafe code.
-                                // The reasons we don't check other statics is twofold. For one, in all
-                                // sound cases, the static was already validated on its own, and second, we
-                                // trigger cycle errors if we try to compute the value of the other static
-                                // and that static refers back to us (potentially through a promoted).
-                                // This could miss some UB, but that's fine.
-                                skip_recursive_check = true;
-                            }
-                            Some(CtfeValidationMode::Const { .. }) => {
-                                // We can't recursively validate `extern static`, so we better reject them.
-                                if self.ecx.tcx.is_foreign_item(did) {
-                                    throw_validation_failure!(self.path, ConstRefToExtern);
-                                }
-                            }
-                            None => {}
+                if let Some(GlobalAlloc::Static(did)) = self.ecx.tcx.try_get_global_alloc(alloc_id)
+                {
+                    let DefKind::Static { nested, .. } = self.ecx.tcx.def_kind(did) else { bug!() };
+                    // Special handling for pointers to statics (irrespective of their type).
+                    assert!(!self.ecx.tcx.is_thread_local_static(did));
+                    assert!(self.ecx.tcx.is_static(did));
+                    // Mode-specific checks
+                    match self.ctfe_mode {
+                        Some(
+                            CtfeValidationMode::Static { .. } | CtfeValidationMode::Promoted { .. },
+                        ) => {
+                            // We skip recursively checking other statics. These statics must be sound by
+                            // themselves, and the only way to get broken statics here is by using
+                            // unsafe code.
+                            // The reasons we don't check other statics is twofold. For one, in all
+                            // sound cases, the static was already validated on its own, and second, we
+                            // trigger cycle errors if we try to compute the value of the other static
+                            // and that static refers back to us (potentially through a promoted).
+                            // This could miss some UB, but that's fine.
+                            // We still walk nested allocations, as they are fundamentally part of this validation run.
+                            // This means we will also recurse into nested statics of *other*
+                            // statics, even though we do not recurse into other statics directly.
+                            // That's somewhat inconsistent but harmless.
+                            skip_recursive_check = !nested;
                         }
-                        // Return alloc mutability. For "root" statics we look at the type to account for interior
-                        // mutability; for nested statics we have no type and directly use the annotated mutability.
-                        let DefKind::Static { mutability, nested } = self.ecx.tcx.def_kind(did)
-                        else {
-                            bug!()
-                        };
-                        match (mutability, nested) {
-                            (Mutability::Mut, _) => Mutability::Mut,
-                            (Mutability::Not, true) => Mutability::Not,
-                            (Mutability::Not, false)
-                                if !self
-                                    .ecx
-                                    .tcx
-                                    .type_of(did)
-                                    .no_bound_vars()
-                                    .expect("statics should not have generic parameters")
-                                    .is_freeze(*self.ecx.tcx, ty::ParamEnv::reveal_all()) =>
-                            {
-                                Mutability::Mut
+                        Some(CtfeValidationMode::Const { .. }) => {
+                            // We can't recursively validate `extern static`, so we better reject them.
+                            if self.ecx.tcx.is_foreign_item(did) {
+                                throw_validation_failure!(self.path, ConstRefToExtern);
                             }
-                            (Mutability::Not, false) => Mutability::Not,
                         }
+                        None => {}
                     }
-                    GlobalAlloc::Memory(alloc) => alloc.inner().mutability,
-                    GlobalAlloc::Function(..) | GlobalAlloc::VTable(..) => {
-                        // These are immutable, we better don't allow mutable pointers here.
-                        Mutability::Not
-                    }
-                };
-                // Mutability check.
+                }
+
+                // Dangling and Mutability check.
+                let (size, _align, alloc_kind) = self.ecx.get_alloc_info(alloc_id);
+                if alloc_kind == AllocKind::Dead {
+                    // This can happen for zero-sized references. We can't have *any* references to non-existing
+                    // allocations though, interning rejects them all as the rest of rustc isn't happy with them...
+                    // so we throw an error, even though this isn't really UB.
+                    // A potential future alternative would be to resurrect this as a zero-sized allocation
+                    // (which codegen will then compile to an aligned dummy pointer anyway).
+                    throw_validation_failure!(self.path, DanglingPtrUseAfterFree { ptr_kind });
+                }
                 // If this allocation has size zero, there is no actual mutability here.
-                let (size, _align, _alloc_kind) = self.ecx.get_alloc_info(alloc_id);
                 if size != Size::ZERO {
+                    let alloc_actual_mutbl = mutability(self.ecx, alloc_id);
                     // Mutable pointer to immutable memory is no good.
                     if ptr_expected_mutbl == Mutability::Mut
                         && alloc_actual_mutbl == Mutability::Not
@@ -614,7 +605,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
                     let _fn = try_validation!(
                         self.ecx.get_ptr_fn(ptr),
                         self.path,
-                        Ub(DanglingIntPointer(..) | InvalidFunctionPointer(..)) =>
+                        Ub(DanglingIntPointer{ .. } | InvalidFunctionPointer(..)) =>
                             InvalidFnPtr { value: format!("{ptr}") },
                     );
                     // FIXME: Check if the signature matches
@@ -665,8 +656,8 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
         let WrappingRange { start, end } = valid_range;
         let max_value = size.unsigned_int_max();
         assert!(end <= max_value);
-        let bits = match scalar.try_to_int() {
-            Ok(int) => int.assert_bits(size),
+        let bits = match scalar.try_to_scalar_int() {
+            Ok(int) => int.to_bits(size),
             Err(_) => {
                 // So this is a pointer then, and casting to an int failed.
                 // Can only happen during CTFE.
@@ -708,27 +699,65 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValidityVisitor<'rt, 'mir, '
     fn in_mutable_memory(&self, op: &OpTy<'tcx, M::Provenance>) -> bool {
         if let Some(mplace) = op.as_mplace_or_imm().left() {
             if let Some(alloc_id) = mplace.ptr().provenance.and_then(|p| p.get_alloc_id()) {
-                let mutability = match self.ecx.tcx.global_alloc(alloc_id) {
-                    GlobalAlloc::Static(_) => {
-                        self.ecx.memory.alloc_map.get(alloc_id).unwrap().1.mutability
-                    }
-                    GlobalAlloc::Memory(alloc) => alloc.inner().mutability,
-                    _ => span_bug!(self.ecx.tcx.span, "not a memory allocation"),
-                };
-                return mutability == Mutability::Mut;
+                return mutability(self.ecx, alloc_id).is_mut();
             }
         }
         false
     }
 }
 
-impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValueVisitor<'mir, 'tcx, M>
-    for ValidityVisitor<'rt, 'mir, 'tcx, M>
-{
+/// Returns whether the allocation is mutable, and whether it's actually a static.
+/// For "root" statics we look at the type to account for interior
+/// mutability; for nested statics we have no type and directly use the annotated mutability.
+fn mutability<'tcx>(ecx: &InterpCx<'tcx, impl Machine<'tcx>>, alloc_id: AllocId) -> Mutability {
+    // Let's see what kind of memory this points to.
+    // We're not using `try_global_alloc` since dangling pointers have already been handled.
+    match ecx.tcx.global_alloc(alloc_id) {
+        GlobalAlloc::Static(did) => {
+            let DefKind::Static { safety: _, mutability, nested } = ecx.tcx.def_kind(did) else {
+                bug!()
+            };
+            if nested {
+                assert!(
+                    ecx.memory.alloc_map.get(alloc_id).is_none(),
+                    "allocations of nested statics are already interned: {alloc_id:?}, {did:?}"
+                );
+                // Nested statics in a `static` are never interior mutable,
+                // so just use the declared mutability.
+                mutability
+            } else {
+                let mutability = match mutability {
+                    Mutability::Not
+                        if !ecx
+                            .tcx
+                            .type_of(did)
+                            .no_bound_vars()
+                            .expect("statics should not have generic parameters")
+                            .is_freeze(*ecx.tcx, ty::ParamEnv::reveal_all()) =>
+                    {
+                        Mutability::Mut
+                    }
+                    _ => mutability,
+                };
+                if let Some((_, alloc)) = ecx.memory.alloc_map.get(alloc_id) {
+                    assert_eq!(alloc.mutability, mutability);
+                }
+                mutability
+            }
+        }
+        GlobalAlloc::Memory(alloc) => alloc.inner().mutability,
+        GlobalAlloc::Function { .. } | GlobalAlloc::VTable(..) => {
+            // These are immutable, we better don't allow mutable pointers here.
+            Mutability::Not
+        }
+    }
+}
+
+impl<'rt, 'tcx, M: Machine<'tcx>> ValueVisitor<'tcx, M> for ValidityVisitor<'rt, 'tcx, M> {
     type V = OpTy<'tcx, M::Provenance>;
 
     #[inline(always)]
-    fn ecx(&self) -> &InterpCx<'mir, 'tcx, M> {
+    fn ecx(&self) -> &InterpCx<'tcx, M> {
         self.ecx
     }
 
@@ -809,6 +838,8 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValueVisitor<'mir, 'tcx, M>
         trace!("visit_value: {:?}, {:?}", *op, op.layout);
 
         // Check primitive types -- the leaves of our recursive descent.
+        // We assume that the Scalar validity range does not restrict these values
+        // any further than `try_visit_primitive` does!
         if self.try_visit_primitive(op)? {
             return Ok(());
         }
@@ -918,7 +949,16 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValueVisitor<'mir, 'tcx, M>
                 }
             }
             _ => {
-                self.walk_value(op)?; // default handler
+                // default handler
+                try_validation!(
+                    self.walk_value(op),
+                    self.path,
+                    // It's not great to catch errors here, since we can't give a very good path,
+                    // but it's better than ICEing.
+                    Ub(InvalidVTableTrait { expected_trait, vtable_trait }) => {
+                        InvalidMetaWrongTrait { expected_trait, vtable_trait: *vtable_trait }
+                    },
+                );
             }
         }
 
@@ -969,7 +1009,7 @@ impl<'rt, 'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> ValueVisitor<'mir, 'tcx, M>
     }
 }
 
-impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
+impl<'tcx, M: Machine<'tcx>> InterpCx<'tcx, M> {
     fn validate_operand_internal(
         &self,
         op: &OpTy<'tcx, M::Provenance>,
@@ -989,7 +1029,9 @@ impl<'mir, 'tcx: 'mir, M: Machine<'mir, 'tcx>> InterpCx<'mir, 'tcx, M> {
             Err(err)
                 if matches!(
                     err.kind(),
-                    err_ub!(ValidationError { .. }) | InterpError::InvalidProgram(_)
+                    err_ub!(ValidationError { .. })
+                        | InterpError::InvalidProgram(_)
+                        | InterpError::Unsupported(UnsupportedOpInfo::ExternTypeField)
                 ) =>
             {
                 Err(err)

@@ -1,6 +1,6 @@
 //@ check-pass
 
-#![warn(unused_imports)]
+#![warn(redundant_imports)]
 
 mod foo {
     use std::fmt;

@@ -1,6 +1,6 @@
 use either::Either;
-use hir::{db::ExpandDatabase, HasSource, HirDisplay, HirFileIdExt, Semantics};
-use ide_db::{base_db::FileId, source_change::SourceChange, RootDatabase};
+use hir::{db::ExpandDatabase, HasSource, HirDisplay, HirFileIdExt, Semantics, VariantId};
+use ide_db::{source_change::SourceChange, EditionedFileId, RootDatabase};
 use syntax::{
     ast::{self, edit::IndentLevel, make},
     AstNode,
@@ -25,7 +25,10 @@ pub(crate) fn no_such_field(ctx: &DiagnosticsContext<'_>, d: &hir::NoSuchField) 
     } else {
         Diagnostic::new_with_syntax_node_ptr(
             ctx,
-            DiagnosticCode::RustcHardError("E0559"),
+            match d.variant {
+                VariantId::EnumVariantId(_) => DiagnosticCode::RustcHardError("E0559"),
+                _ => DiagnosticCode::RustcHardError("E0560"),
+            },
             "no such field",
             node,
         )
@@ -48,7 +51,7 @@ fn fixes(ctx: &DiagnosticsContext<'_>, d: &hir::NoSuchField) -> Option<Vec<Assis
 
 fn missing_record_expr_field_fixes(
     sema: &Semantics<'_, RootDatabase>,
-    usage_file_id: FileId,
+    usage_file_id: EditionedFileId,
     record_expr_field: &ast::RecordExprField,
 ) -> Option<Vec<Assist>> {
     let record_lit = ast::RecordExpr::cast(record_expr_field.syntax().parent()?.parent()?)?;

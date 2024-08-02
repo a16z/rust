@@ -1,4 +1,4 @@
-#![deny(unused_imports)]
+#![deny(redundant_imports)]
 
 struct S;
 

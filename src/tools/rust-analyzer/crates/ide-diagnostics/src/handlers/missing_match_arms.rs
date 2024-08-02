@@ -317,7 +317,8 @@ fn main() {
     #[test]
     fn mismatched_types_issue_15883() {
         // Check we don't panic.
-        check_diagnostics_no_bails(
+        cov_mark::check!(validate_match_bailed_out);
+        check_diagnostics(
             r#"
 //- minicore: option
 fn main() {
@@ -607,8 +608,8 @@ fn main() {
     // `Never` is deliberately not defined so that it's an uninferred type.
     // We ignore these to avoid triggering bugs in the analysis.
     match Option::<Never>::None {
-        None => (),
-        Some(never) => match never {},
+        Option::None => (),
+        Option::Some(never) => match never {},
     }
     match Option::<Never>::None {
         Option::Some(_never) => {},

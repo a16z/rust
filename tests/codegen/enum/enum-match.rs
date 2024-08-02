@@ -11,11 +11,11 @@ pub enum Enum0 {
     B,
 }
 
-// CHECK: define noundef i8 @match0{{.*}}
+// CHECK: define noundef{{( range\(i8 [0-9]+, [0-9]+\))?}} i8 @match0{{.*}}
 // CHECK-NEXT: start:
 // CHECK-NEXT: %1 = icmp eq i8 %0, 2
 // CHECK-NEXT: %2 = and i8 %0, 1
-// CHECK-NEXT: %_0.0 = select i1 %1, i8 13, i8 %2
+// CHECK-NEXT: %{{.+}} = select i1 %1, i8 13, i8 %2
 #[no_mangle]
 pub fn match0(e: Enum0) -> u8 {
     use Enum0::*;
@@ -32,7 +32,7 @@ pub enum Enum1 {
     C,
 }
 
-// CHECK: define noundef i8 @match1{{.*}}
+// CHECK: define noundef{{( range\(i8 [0-9]+, [0-9]+\))?}} i8 @match1{{.*}}
 // CHECK-NEXT: start:
 // CHECK-NEXT: %1 = add i8 %0, -2
 // CHECK-NEXT: %2 = zext i8 %1 to i64
@@ -50,6 +50,7 @@ pub fn match1(e: Enum1) -> u8 {
 }
 
 // Case 2: Special cases don't apply.
+#[rustfmt::skip]
 pub enum X {
     _2=2, _3, _4, _5, _6, _7, _8, _9, _10, _11,
     _12, _13, _14, _15, _16, _17, _18, _19, _20,
@@ -91,7 +92,7 @@ pub enum Enum2 {
     E,
 }
 
-// CHECK: define noundef i8 @match2{{.*}}
+// CHECK: define noundef{{( range\(i8 [0-9]+, [0-9]+\))?}} i8 @match2{{.*}}
 // CHECK-NEXT: start:
 // CHECK-NEXT: %1 = add i8 %0, 2
 // CHECK-NEXT: %2 = zext i8 %1 to i64

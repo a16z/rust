@@ -1,13 +1,11 @@
-use crate::error;
-use crate::fmt;
+use super::abi::usercalls;
 use crate::io::{self, BorrowedCursor, IoSlice, IoSliceMut};
 use crate::net::{Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, ToSocketAddrs};
 use crate::sync::Arc;
 use crate::sys::fd::FileDesc;
 use crate::sys::{sgx_ineffective, unsupported, AsInner, FromInner, IntoInner, TryIntoInner};
 use crate::time::Duration;
-
-use super::abi::usercalls;
+use crate::{error, fmt};
 
 const DEFAULT_FAKE_TTL: u32 = 64;
 
@@ -97,10 +95,7 @@ impl TcpStream {
 
     pub fn connect_timeout(addr: &SocketAddr, dur: Duration) -> io::Result<TcpStream> {
         if dur == Duration::default() {
-            return Err(io::const_io_error!(
-                io::ErrorKind::InvalidInput,
-                "cannot set a 0 duration timeout",
-            ));
+            return Err(io::Error::ZERO_TIMEOUT);
         }
         Self::connect(Ok(addr)) // FIXME: ignoring timeout
     }
@@ -108,10 +103,7 @@ impl TcpStream {
     pub fn set_read_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         match dur {
             Some(dur) if dur == Duration::default() => {
-                return Err(io::const_io_error!(
-                    io::ErrorKind::InvalidInput,
-                    "cannot set a 0 duration timeout",
-                ));
+                return Err(io::Error::ZERO_TIMEOUT);
             }
             _ => sgx_ineffective(()),
         }
@@ -120,10 +112,7 @@ impl TcpStream {
     pub fn set_write_timeout(&self, dur: Option<Duration>) -> io::Result<()> {
         match dur {
             Some(dur) if dur == Duration::default() => {
-                return Err(io::const_io_error!(
-                    io::ErrorKind::InvalidInput,
-                    "cannot set a 0 duration timeout",
-                ));
+                return Err(io::Error::ZERO_TIMEOUT);
             }
             _ => sgx_ineffective(()),
         }

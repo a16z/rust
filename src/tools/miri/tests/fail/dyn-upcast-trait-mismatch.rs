@@ -1,3 +1,6 @@
+// Validation stops this too early.
+//@compile-flags: -Zmiri-disable-validation
+
 #![feature(trait_upcasting)]
 #![allow(incomplete_features)]
 
@@ -56,8 +59,10 @@ impl Baz for i32 {
 }
 
 fn main() {
-    let baz: &dyn Baz = &1;
-    let baz_fake: &dyn Bar = unsafe { std::mem::transmute(baz) };
-    let _err = baz_fake as &dyn Foo;
-    //~^ERROR: upcast on a pointer whose vtable does not match its type
+    unsafe {
+        let baz: &dyn Baz = &1;
+        let baz_fake: *const dyn Bar = std::mem::transmute(baz);
+        let _err = baz_fake as *const dyn Foo;
+        //~^ERROR: using vtable for trait `Baz` but trait `Bar` was expected
+    }
 }

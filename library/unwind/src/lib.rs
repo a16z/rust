@@ -2,7 +2,6 @@
 #![unstable(feature = "panic_unwind", issue = "32837")]
 #![feature(link_cfg)]
 #![feature(staged_api)]
-#![feature(c_unwind)]
 #![feature(strict_provenance)]
 #![cfg_attr(target_arch = "wasm64", feature(simd_wasm64))]
 #![cfg_attr(not(target_env = "msvc"), feature(libc))]
@@ -11,6 +10,10 @@
     feature(link_llvm_intrinsics)
 )]
 #![allow(internal_features)]
+
+// Force libc to be included even if unused. This is required by many platforms.
+#[cfg(not(all(windows, target_env = "msvc")))]
+extern crate libc as _;
 
 cfg_if::cfg_if! {
     if #[cfg(target_env = "msvc")] {

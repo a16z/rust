@@ -34,37 +34,24 @@ pub mod process;
 pub mod stdio;
 #[path = "../wasi/thread.rs"]
 pub mod thread;
-#[path = "../unsupported/thread_local_dtor.rs"]
-pub mod thread_local_dtor;
-#[path = "../unsupported/thread_local_key.rs"]
-pub mod thread_local_key;
 #[path = "../wasi/time.rs"]
 pub mod time;
-
-cfg_if::cfg_if! {
-    if #[cfg(target_feature = "atomics")] {
-        compile_error!("The wasm32-wasip2 target does not support atomics");
-    } else {
-        #[path = "../unsupported/thread_parking.rs"]
-        pub mod thread_parking;
-    }
-}
 
 #[path = "../unsupported/common.rs"]
 #[deny(unsafe_op_in_unsafe_fn)]
 #[allow(unused)]
 mod common;
+
 pub use common::*;
 
 #[path = "../wasi/helpers.rs"]
 mod helpers;
-// These exports are listed individually to work around Rust's glob import
-// conflict rules. If we glob export `helpers` and `common` together, then
-// the compiler complains about conflicts.
-pub use helpers::abort_internal;
-pub use helpers::decode_error_kind;
+
+// The following exports are listed individually to work around Rust's glob
+// import conflict rules. If we glob export `helpers` and `common` together,
+// then the compiler complains about conflicts.
+
 use helpers::err2io;
-pub use helpers::hashmap_random_keys;
-pub use helpers::is_interrupted;
+pub use helpers::{abort_internal, decode_error_kind, hashmap_random_keys, is_interrupted};
 
 mod cabi_realloc;

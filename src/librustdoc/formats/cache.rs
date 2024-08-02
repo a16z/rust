@@ -5,7 +5,8 @@ use rustc_hir::def_id::{CrateNum, DefId, DefIdMap, DefIdSet};
 use rustc_middle::ty::{self, TyCtxt};
 use rustc_span::Symbol;
 
-use crate::clean::{self, types::ExternalLocation, ExternalCrate, ItemId, PrimitiveType};
+use crate::clean::types::ExternalLocation;
+use crate::clean::{self, ExternalCrate, ItemId, PrimitiveType};
 use crate::core::DocContext;
 use crate::fold::DocFolder;
 use crate::formats::item_type::ItemType;
@@ -203,10 +204,10 @@ impl Cache {
 impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
     fn fold_item(&mut self, item: clean::Item) -> Option<clean::Item> {
         if item.item_id.is_local() {
-            let is_stripped = matches!(*item.kind, clean::ItemKind::StrippedItem(..));
             debug!(
-                "folding {} (stripped: {is_stripped:?}) \"{:?}\", id {:?}",
+                "folding {} (stripped: {:?}) \"{:?}\", id {:?}",
                 item.type_(),
+                item.is_stripped(),
                 item.name,
                 item.item_id
             );
@@ -246,13 +247,11 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
         // trait.
         if let clean::TraitItem(ref t) = *item.kind {
             self.cache.traits.entry(item.item_id.expect_def_id()).or_insert_with(|| (**t).clone());
-        }
-
-        // Collect all the implementors of traits.
-        if let clean::ImplItem(ref i) = *item.kind
+        } else if let clean::ImplItem(ref i) = *item.kind
             && let Some(trait_) = &i.trait_
             && !i.kind.is_blanket()
         {
+            // Collect all the implementors of traits.
             self.cache
                 .implementors
                 .entry(trait_.def_id())
@@ -348,16 +347,28 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
                     {
                         let desc =
                             short_markdown_summary(&item.doc_value(), &item.link_names(self.cache));
+                        // For searching purposes, a re-export is a duplicate if:
+                        //
+                        // - It's either an inline, or a true re-export
+                        // - It's got the same name
+                        // - Both of them have the same exact path
+                        let defid = (match &*item.kind {
+                            &clean::ItemKind::ImportItem(ref import) => import.source.did,
+                            _ => None,
+                        })
+                        .or_else(|| item.item_id.as_def_id());
                         // In case this is a field from a tuple struct, we don't add it into
                         // the search index because its name is something like "0", which is
                         // not useful for rustdoc search.
                         self.cache.search_index.push(IndexItem {
                             ty,
+                            defid,
                             name: s,
                             path: join_with_double_colon(path),
                             desc,
                             parent,
                             parent_idx: None,
+                            exact_path: None,
                             impl_id: if let Some(ParentStackItem::Impl { item_id, .. }) =
                                 self.cache.parent_stack.last()
                             {
@@ -452,7 +463,6 @@ impl<'a, 'tcx> DocFolder for CacheBuilder<'a, 'tcx> {
 
             clean::ExternCrateItem { .. }
             | clean::ImportItem(..)
-            | clean::OpaqueTyItem(..)
             | clean::ImplItem(..)
             | clean::TyMethodItem(..)
             | clean::MethodItem(..)

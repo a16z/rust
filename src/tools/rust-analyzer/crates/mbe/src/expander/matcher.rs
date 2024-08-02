@@ -59,27 +59,27 @@
 //! eof: [a $( a )* a b ·]
 //! ```
 
-use std::rc::Rc;
+use std::{rc::Rc, sync::Arc};
 
+use intern::{sym, Symbol};
 use smallvec::{smallvec, SmallVec};
-use span::Span;
-use syntax::SmolStr;
-use tt::DelimSpan;
+use span::{Edition, Span};
+use tt::{iter::TtIter, DelimSpan};
 
 use crate::{
     expander::{Binding, Bindings, ExpandResult, Fragment},
+    expect_fragment,
     parser::{MetaVarKind, Op, RepeatKind, Separator},
-    tt_iter::TtIter,
-    ExpandError, MetaTemplate, ValueResult,
+    ExpandError, ExpandErrorKind, MetaTemplate, ValueResult,
 };
 
 impl Bindings {
-    fn push_optional(&mut self, name: &SmolStr) {
-        self.inner.insert(name.clone(), Binding::Fragment(Fragment::Empty));
+    fn push_optional(&mut self, name: Symbol) {
+        self.inner.insert(name, Binding::Fragment(Fragment::Empty));
     }
 
-    fn push_empty(&mut self, name: &SmolStr) {
-        self.inner.insert(name.clone(), Binding::Empty);
+    fn push_empty(&mut self, name: Symbol) {
+        self.inner.insert(name, Binding::Empty);
     }
 
     fn bindings(&self) -> impl Iterator<Item = &Binding> {
@@ -108,8 +108,8 @@ impl Match {
 }
 
 /// Matching errors are added to the `Match`.
-pub(super) fn match_(pattern: &MetaTemplate, input: &tt::Subtree<Span>) -> Match {
-    let mut res = match_loop(pattern, input);
+pub(super) fn match_(pattern: &MetaTemplate, input: &tt::Subtree<Span>, edition: Edition) -> Match {
+    let mut res = match_loop(pattern, input, edition);
     res.bound_count = count(res.bindings.bindings());
     return res;
 
@@ -127,10 +127,10 @@ pub(super) fn match_(pattern: &MetaTemplate, input: &tt::Subtree<Span>) -> Match
 
 #[derive(Debug, Clone)]
 enum BindingKind {
-    Empty(SmolStr),
-    Optional(SmolStr),
-    Fragment(SmolStr, Fragment),
-    Missing(SmolStr, MetaVarKind),
+    Empty(Symbol),
+    Optional(Symbol),
+    Fragment(Symbol, Fragment),
+    Missing(Symbol, MetaVarKind),
     Nested(usize, usize),
 }
 
@@ -178,20 +178,20 @@ impl BindingsBuilder {
         }
     }
 
-    fn push_empty(&mut self, idx: &mut BindingsIdx, var: &SmolStr) {
+    fn push_empty(&mut self, idx: &mut BindingsIdx, var: &Symbol) {
         self.nodes[idx.0].push(LinkNode::Node(Rc::new(BindingKind::Empty(var.clone()))));
     }
 
-    fn push_optional(&mut self, idx: &mut BindingsIdx, var: &SmolStr) {
+    fn push_optional(&mut self, idx: &mut BindingsIdx, var: &Symbol) {
         self.nodes[idx.0].push(LinkNode::Node(Rc::new(BindingKind::Optional(var.clone()))));
     }
 
-    fn push_fragment(&mut self, idx: &mut BindingsIdx, var: &SmolStr, fragment: Fragment) {
+    fn push_fragment(&mut self, idx: &mut BindingsIdx, var: &Symbol, fragment: Fragment) {
         self.nodes[idx.0]
             .push(LinkNode::Node(Rc::new(BindingKind::Fragment(var.clone(), fragment))));
     }
 
-    fn push_missing(&mut self, idx: &mut BindingsIdx, var: &SmolStr, kind: MetaVarKind) {
+    fn push_missing(&mut self, idx: &mut BindingsIdx, var: &Symbol, kind: MetaVarKind) {
         self.nodes[idx.0].push(LinkNode::Node(Rc::new(BindingKind::Missing(var.clone(), kind))));
     }
 
@@ -219,10 +219,10 @@ impl BindingsBuilder {
         for cmd in nodes {
             match cmd {
                 BindingKind::Empty(name) => {
-                    bindings.push_empty(name);
+                    bindings.push_empty(name.clone());
                 }
                 BindingKind::Optional(name) => {
-                    bindings.push_optional(name);
+                    bindings.push_optional(name.clone());
                 }
                 BindingKind::Fragment(name, fragment) => {
                     bindings.inner.insert(name.clone(), Binding::Fragment(fragment.clone()));
@@ -315,7 +315,7 @@ struct MatchState<'t> {
     up: Option<Box<MatchState<'t>>>,
 
     /// The separator if we are in a repetition.
-    sep: Option<Separator>,
+    sep: Option<Arc<Separator>>,
 
     /// The KleeneOp of this sequence if we are in a repetition.
     sep_kind: Option<RepeatKind>,
@@ -363,6 +363,7 @@ fn match_loop_inner<'t>(
     eof_items: &mut SmallVec<[MatchState<'t>; 1]>,
     error_items: &mut SmallVec<[MatchState<'t>; 1]>,
     delim_span: tt::DelimSpan<Span>,
+    edition: Edition,
 ) {
     macro_rules! try_push {
         ($items: expr, $it:expr) => {
@@ -405,7 +406,7 @@ fn match_loop_inner<'t>(
                     if item.sep.is_some() && !item.sep_matched {
                         let sep = item.sep.as_ref().unwrap();
                         let mut fork = src.clone();
-                        if fork.expect_separator(sep) {
+                        if expect_separator(&mut fork, sep) {
                             // HACK: here we use `meta_result` to pass `TtIter` back to caller because
                             // it might have been advanced multiple times. `ValueResult` is
                             // insignificant.
@@ -473,7 +474,7 @@ fn match_loop_inner<'t>(
             OpDelimited::Op(Op::Var { kind, name, .. }) => {
                 if let &Some(kind) = kind {
                     let mut fork = src.clone();
-                    let match_res = match_meta_var(kind, &mut fork, delim_span);
+                    let match_res = match_meta_var(kind, &mut fork, delim_span, edition);
                     match match_res.err {
                         None => {
                             // Some meta variables are optional (e.g. vis)
@@ -506,28 +507,40 @@ fn match_loop_inner<'t>(
             }
             OpDelimited::Op(Op::Literal(lhs)) => {
                 if let Ok(rhs) = src.clone().expect_leaf() {
-                    if matches!(rhs, tt::Leaf::Literal(it) if it.text == lhs.text) {
+                    if matches!(rhs, tt::Leaf::Literal(it) if it.symbol == lhs.symbol) {
                         item.dot.next();
                     } else {
-                        res.add_err(ExpandError::UnexpectedToken);
+                        res.add_err(ExpandError::new(
+                            *rhs.span(),
+                            ExpandErrorKind::UnexpectedToken,
+                        ));
                         item.is_error = true;
                     }
                 } else {
-                    res.add_err(ExpandError::binding_error(format!("expected literal: `{lhs}`")));
+                    res.add_err(ExpandError::binding_error(
+                        src.clone().next().map_or(delim_span.close, |it| it.first_span()),
+                        format!("expected literal: `{lhs}`"),
+                    ));
                     item.is_error = true;
                 }
                 try_push!(next_items, item);
             }
             OpDelimited::Op(Op::Ident(lhs)) => {
                 if let Ok(rhs) = src.clone().expect_leaf() {
-                    if matches!(rhs, tt::Leaf::Ident(it) if it.text == lhs.text) {
+                    if matches!(rhs, tt::Leaf::Ident(it) if it.sym == lhs.sym) {
                         item.dot.next();
                     } else {
-                        res.add_err(ExpandError::UnexpectedToken);
+                        res.add_err(ExpandError::new(
+                            *rhs.span(),
+                            ExpandErrorKind::UnexpectedToken,
+                        ));
                         item.is_error = true;
                     }
                 } else {
-                    res.add_err(ExpandError::binding_error(format!("expected ident: `{lhs}`")));
+                    res.add_err(ExpandError::binding_error(
+                        src.clone().next().map_or(delim_span.close, |it| it.first_span()),
+                        format!("expected ident: `{lhs}`"),
+                    ));
                     item.is_error = true;
                 }
                 try_push!(next_items, item);
@@ -537,8 +550,8 @@ fn match_loop_inner<'t>(
                 let error = if let Ok(rhs) = fork.expect_glued_punct() {
                     let first_is_single_quote = rhs[0].char == '\'';
                     let lhs = lhs.iter().map(|it| it.char);
-                    let rhs = rhs.iter().map(|it| it.char);
-                    if lhs.clone().eq(rhs) {
+                    let rhs_ = rhs.iter().map(|it| it.char);
+                    if lhs.clone().eq(rhs_) {
                         // HACK: here we use `meta_result` to pass `TtIter` back to caller because
                         // it might have been advanced multiple times. `ValueResult` is
                         // insignificant.
@@ -551,13 +564,19 @@ fn match_loop_inner<'t>(
                     if first_is_single_quote {
                         // If the first punct token is a single quote, that's a part of a lifetime
                         // ident, not a punct.
-                        ExpandError::UnexpectedToken
+                        ExpandError::new(
+                            rhs.get(1).map_or(rhs[0].span, |it| it.span),
+                            ExpandErrorKind::UnexpectedToken,
+                        )
                     } else {
-                        let lhs: SmolStr = lhs.collect();
-                        ExpandError::binding_error(format!("expected punct: `{lhs}`"))
+                        let lhs = lhs.collect::<String>();
+                        ExpandError::binding_error(rhs[0].span, format!("expected punct: `{lhs}`"))
                     }
                 } else {
-                    ExpandError::UnexpectedToken
+                    ExpandError::new(
+                        src.clone().next().map_or(delim_span.close, |it| it.first_span()),
+                        ExpandErrorKind::UnexpectedToken,
+                    )
                 };
 
                 res.add_err(error);
@@ -565,7 +584,7 @@ fn match_loop_inner<'t>(
                 error_items.push(item);
             }
             OpDelimited::Op(
-                Op::Ignore { .. } | Op::Index { .. } | Op::Count { .. } | Op::Length { .. },
+                Op::Ignore { .. } | Op::Index { .. } | Op::Count { .. } | Op::Len { .. },
             ) => {
                 stdx::never!("metavariable expression in lhs found");
             }
@@ -586,7 +605,7 @@ fn match_loop_inner<'t>(
     }
 }
 
-fn match_loop(pattern: &MetaTemplate, src: &tt::Subtree<Span>) -> Match {
+fn match_loop(pattern: &MetaTemplate, src: &tt::Subtree<Span>, edition: Edition) -> Match {
     let span = src.delimiter.delim_span();
     let mut src = TtIter::new(src);
     let mut stack: SmallVec<[TtIter<'_, Span>; 1]> = SmallVec::new();
@@ -627,6 +646,7 @@ fn match_loop(pattern: &MetaTemplate, src: &tt::Subtree<Span>) -> Match {
             &mut eof_items,
             &mut error_items,
             span,
+            edition,
         );
         stdx::always!(cur_items.is_empty());
 
@@ -649,7 +669,7 @@ fn match_loop(pattern: &MetaTemplate, src: &tt::Subtree<Span>) -> Match {
                 if let Some(item) = error_recover_item {
                     res.bindings = bindings_builder.build(&item);
                 }
-                res.add_err(ExpandError::UnexpectedToken);
+                res.add_err(ExpandError::new(span.open, ExpandErrorKind::UnexpectedToken));
             }
             return res;
         }
@@ -668,7 +688,7 @@ fn match_loop(pattern: &MetaTemplate, src: &tt::Subtree<Span>) -> Match {
                 src = it;
                 res.unmatched_tts += src.len();
             }
-            res.add_err(ExpandError::LeftoverTokens);
+            res.add_err(ExpandError::new(span.open, ExpandErrorKind::LeftoverTokens));
 
             if let Some(error_recover_item) = error_recover_item {
                 res.bindings = bindings_builder.build(&error_recover_item);
@@ -740,21 +760,15 @@ fn match_meta_var(
     kind: MetaVarKind,
     input: &mut TtIter<'_, Span>,
     delim_span: DelimSpan<Span>,
+    edition: Edition,
 ) -> ExpandResult<Option<Fragment>> {
     let fragment = match kind {
         MetaVarKind::Path => {
-            return input.expect_fragment(parser::PrefixEntryPoint::Path).map(|it| {
-                it.map(|it| tt::TokenTree::subtree_or_wrap(it, delim_span)).map(Fragment::Path)
-            });
+            return expect_fragment(input, parser::PrefixEntryPoint::Path, edition, delim_span)
+                .map(|it| {
+                    it.map(|it| tt::TokenTree::subtree_or_wrap(it, delim_span)).map(Fragment::Path)
+                });
         }
-        MetaVarKind::Ty => parser::PrefixEntryPoint::Ty,
-        MetaVarKind::Pat => parser::PrefixEntryPoint::PatTop,
-        MetaVarKind::PatParam => parser::PrefixEntryPoint::Pat,
-        MetaVarKind::Stmt => parser::PrefixEntryPoint::Stmt,
-        MetaVarKind::Block => parser::PrefixEntryPoint::Block,
-        MetaVarKind::Meta => parser::PrefixEntryPoint::MetaItem,
-        MetaVarKind::Item => parser::PrefixEntryPoint::Item,
-        MetaVarKind::Vis => parser::PrefixEntryPoint::Vis,
         MetaVarKind::Expr => {
             // `expr` should not match underscores, let expressions, or inline const. The latter
             // two are for [backwards compatibility][0].
@@ -764,42 +778,60 @@ fn match_meta_var(
             // [1]: https://github.com/rust-lang/rust/blob/f0c4da499/compiler/rustc_expand/src/mbe/macro_parser.rs#L576
             match input.peek_n(0) {
                 Some(tt::TokenTree::Leaf(tt::Leaf::Ident(it)))
-                    if it.text == "_" || it.text == "let" || it.text == "const" =>
+                    if it.sym == sym::underscore
+                        || it.sym == sym::let_
+                        || it.sym == sym::const_ =>
                 {
-                    return ExpandResult::only_err(ExpandError::NoMatchingRule)
+                    return ExpandResult::only_err(ExpandError::new(
+                        it.span,
+                        ExpandErrorKind::NoMatchingRule,
+                    ))
                 }
                 _ => {}
             };
-            return input.expect_fragment(parser::PrefixEntryPoint::Expr).map(|tt| {
-                tt.map(|tt| match tt {
-                    tt::TokenTree::Leaf(leaf) => tt::Subtree {
-                        delimiter: tt::Delimiter::invisible_spanned(*leaf.span()),
-                        token_trees: Box::new([leaf.into()]),
-                    },
-                    tt::TokenTree::Subtree(mut s) => {
-                        if s.delimiter.kind == tt::DelimiterKind::Invisible {
-                            s.delimiter.kind = tt::DelimiterKind::Parenthesis;
+            return expect_fragment(input, parser::PrefixEntryPoint::Expr, edition, delim_span)
+                .map(|tt| {
+                    tt.map(|tt| match tt {
+                        tt::TokenTree::Leaf(leaf) => tt::Subtree {
+                            delimiter: tt::Delimiter::invisible_spanned(*leaf.span()),
+                            token_trees: Box::new([leaf.into()]),
+                        },
+                        tt::TokenTree::Subtree(mut s) => {
+                            if s.delimiter.kind == tt::DelimiterKind::Invisible {
+                                s.delimiter.kind = tt::DelimiterKind::Parenthesis;
+                            }
+                            s
                         }
-                        s
-                    }
-                })
-                .map(Fragment::Expr)
-            });
+                    })
+                    .map(Fragment::Expr)
+                });
         }
         MetaVarKind::Ident | MetaVarKind::Tt | MetaVarKind::Lifetime | MetaVarKind::Literal => {
+            let span = input.next_span();
             let tt_result = match kind {
                 MetaVarKind::Ident => input
                     .expect_ident()
                     .map(|ident| tt::Leaf::from(ident.clone()).into())
-                    .map_err(|()| ExpandError::binding_error("expected ident")),
-                MetaVarKind::Tt => input
-                    .expect_tt()
-                    .map_err(|()| ExpandError::binding_error("expected token tree")),
-                MetaVarKind::Lifetime => input
-                    .expect_lifetime()
-                    .map_err(|()| ExpandError::binding_error("expected lifetime")),
+                    .map_err(|()| {
+                        ExpandError::binding_error(
+                            span.unwrap_or(delim_span.close),
+                            "expected ident",
+                        )
+                    }),
+                MetaVarKind::Tt => expect_tt(input).map_err(|()| {
+                    ExpandError::binding_error(
+                        span.unwrap_or(delim_span.close),
+                        "expected token tree",
+                    )
+                }),
+                MetaVarKind::Lifetime => expect_lifetime(input).map_err(|()| {
+                    ExpandError::binding_error(
+                        span.unwrap_or(delim_span.close),
+                        "expected lifetime",
+                    )
+                }),
                 MetaVarKind::Literal => {
-                    let neg = input.eat_char('-');
+                    let neg = eat_char(input, '-');
                     input
                         .expect_literal()
                         .map(|literal| {
@@ -812,24 +844,37 @@ fn match_meta_var(
                                 }),
                             }
                         })
-                        .map_err(|()| ExpandError::binding_error("expected literal"))
+                        .map_err(|()| {
+                            ExpandError::binding_error(
+                                span.unwrap_or(delim_span.close),
+                                "expected literal",
+                            )
+                        })
                 }
                 _ => unreachable!(),
             };
             return tt_result.map(|it| Some(Fragment::Tokens(it))).into();
         }
+        MetaVarKind::Ty => parser::PrefixEntryPoint::Ty,
+        MetaVarKind::Pat => parser::PrefixEntryPoint::PatTop,
+        MetaVarKind::PatParam => parser::PrefixEntryPoint::Pat,
+        MetaVarKind::Stmt => parser::PrefixEntryPoint::Stmt,
+        MetaVarKind::Block => parser::PrefixEntryPoint::Block,
+        MetaVarKind::Meta => parser::PrefixEntryPoint::MetaItem,
+        MetaVarKind::Item => parser::PrefixEntryPoint::Item,
+        MetaVarKind::Vis => parser::PrefixEntryPoint::Vis,
     };
-    input.expect_fragment(fragment).map(|it| it.map(Fragment::Tokens))
+    expect_fragment(input, fragment, edition, delim_span).map(|it| it.map(Fragment::Tokens))
 }
 
-fn collect_vars(collector_fun: &mut impl FnMut(SmolStr), pattern: &MetaTemplate) {
+fn collect_vars(collector_fun: &mut impl FnMut(Symbol), pattern: &MetaTemplate) {
     for op in pattern.iter() {
         match op {
             Op::Var { name, .. } => collector_fun(name.clone()),
             Op::Subtree { tokens, .. } => collect_vars(collector_fun, tokens),
             Op::Repeat { tokens, .. } => collect_vars(collector_fun, tokens),
             Op::Literal(_) | Op::Ident(_) | Op::Punct(_) => {}
-            Op::Ignore { .. } | Op::Index { .. } | Op::Count { .. } | Op::Length { .. } => {
+            Op::Ignore { .. } | Op::Index { .. } | Op::Count { .. } | Op::Len { .. } => {
                 stdx::never!("metavariable expression in lhs found");
             }
         }
@@ -902,86 +947,84 @@ impl<'a> Iterator for OpDelimitedIter<'a> {
     }
 }
 
-impl TtIter<'_, Span> {
-    fn expect_separator(&mut self, separator: &Separator) -> bool {
-        let mut fork = self.clone();
-        let ok = match separator {
-            Separator::Ident(lhs) => match fork.expect_ident_or_underscore() {
-                Ok(rhs) => rhs.text == lhs.text,
-                Err(_) => false,
+fn expect_separator<S: Copy>(iter: &mut TtIter<'_, S>, separator: &Separator) -> bool {
+    let mut fork = iter.clone();
+    let ok = match separator {
+        Separator::Ident(lhs) => match fork.expect_ident_or_underscore() {
+            Ok(rhs) => rhs.sym == lhs.sym,
+            Err(_) => false,
+        },
+        Separator::Literal(lhs) => match fork.expect_literal() {
+            Ok(rhs) => match rhs {
+                tt::Leaf::Literal(rhs) => rhs.symbol == lhs.symbol,
+                tt::Leaf::Ident(rhs) => rhs.sym == lhs.symbol,
+                tt::Leaf::Punct(_) => false,
             },
-            Separator::Literal(lhs) => match fork.expect_literal() {
-                Ok(rhs) => match rhs {
-                    tt::Leaf::Literal(rhs) => rhs.text == lhs.text,
-                    tt::Leaf::Ident(rhs) => rhs.text == lhs.text,
-                    tt::Leaf::Punct(_) => false,
-                },
-                Err(_) => false,
-            },
-            Separator::Puncts(lhs) => match fork.expect_glued_punct() {
-                Ok(rhs) => {
-                    let lhs = lhs.iter().map(|it| it.char);
-                    let rhs = rhs.iter().map(|it| it.char);
-                    lhs.eq(rhs)
-                }
-                Err(_) => false,
-            },
-        };
-        if ok {
-            *self = fork;
-        }
-        ok
-    }
-
-    fn expect_tt(&mut self) -> Result<tt::TokenTree<Span>, ()> {
-        if let Some(tt::TokenTree::Leaf(tt::Leaf::Punct(punct))) = self.peek_n(0) {
-            if punct.char == '\'' {
-                self.expect_lifetime()
-            } else {
-                let puncts = self.expect_glued_punct()?;
-                let delimiter = tt::Delimiter {
-                    open: puncts.first().unwrap().span,
-                    close: puncts.last().unwrap().span,
-                    kind: tt::DelimiterKind::Invisible,
-                };
-                let token_trees = puncts.into_iter().map(|p| tt::Leaf::Punct(p).into()).collect();
-                Ok(tt::TokenTree::Subtree(tt::Subtree { delimiter, token_trees }))
+            Err(_) => false,
+        },
+        Separator::Puncts(lhs) => match fork.expect_glued_punct() {
+            Ok(rhs) => {
+                let lhs = lhs.iter().map(|it| it.char);
+                let rhs = rhs.iter().map(|it| it.char);
+                lhs.eq(rhs)
             }
+            Err(_) => false,
+        },
+    };
+    if ok {
+        *iter = fork;
+    }
+    ok
+}
+
+fn expect_tt<S: Copy>(iter: &mut TtIter<'_, S>) -> Result<tt::TokenTree<S>, ()> {
+    if let Some(tt::TokenTree::Leaf(tt::Leaf::Punct(punct))) = iter.peek_n(0) {
+        if punct.char == '\'' {
+            expect_lifetime(iter)
         } else {
-            self.next().ok_or(()).cloned()
-        }
-    }
-
-    fn expect_lifetime(&mut self) -> Result<tt::TokenTree<Span>, ()> {
-        let punct = self.expect_single_punct()?;
-        if punct.char != '\'' {
-            return Err(());
-        }
-        let ident = self.expect_ident_or_underscore()?;
-
-        Ok(tt::Subtree {
-            delimiter: tt::Delimiter {
-                open: punct.span,
-                close: ident.span,
+            let puncts = iter.expect_glued_punct()?;
+            let delimiter = tt::Delimiter {
+                open: puncts.first().unwrap().span,
+                close: puncts.last().unwrap().span,
                 kind: tt::DelimiterKind::Invisible,
-            },
-            token_trees: Box::new([
-                tt::Leaf::Punct(*punct).into(),
-                tt::Leaf::Ident(ident.clone()).into(),
-            ]),
+            };
+            let token_trees = puncts.into_iter().map(|p| tt::Leaf::Punct(p).into()).collect();
+            Ok(tt::TokenTree::Subtree(tt::Subtree { delimiter, token_trees }))
         }
-        .into())
+    } else {
+        iter.next().ok_or(()).cloned()
     }
+}
 
-    fn eat_char(&mut self, c: char) -> Option<tt::TokenTree<Span>> {
-        let mut fork = self.clone();
-        match fork.expect_char(c) {
-            Ok(_) => {
-                let tt = self.next().cloned();
-                *self = fork;
-                tt
-            }
-            Err(_) => None,
+fn expect_lifetime<S: Copy>(iter: &mut TtIter<'_, S>) -> Result<tt::TokenTree<S>, ()> {
+    let punct = iter.expect_single_punct()?;
+    if punct.char != '\'' {
+        return Err(());
+    }
+    let ident = iter.expect_ident_or_underscore()?;
+
+    Ok(tt::Subtree {
+        delimiter: tt::Delimiter {
+            open: punct.span,
+            close: ident.span,
+            kind: tt::DelimiterKind::Invisible,
+        },
+        token_trees: Box::new([
+            tt::Leaf::Punct(*punct).into(),
+            tt::Leaf::Ident(ident.clone()).into(),
+        ]),
+    }
+    .into())
+}
+
+fn eat_char<S: Copy>(iter: &mut TtIter<'_, S>, c: char) -> Option<tt::TokenTree<S>> {
+    let mut fork = iter.clone();
+    match fork.expect_char(c) {
+        Ok(_) => {
+            let tt = iter.next().cloned();
+            *iter = fork;
+            tt
         }
+        Err(_) => None,
     }
 }

@@ -1,10 +1,13 @@
-use super::*;
-use crate::infer::snapshot::CombinedSnapshot;
 use rustc_data_structures::fx::FxIndexMap;
-use rustc_data_structures::graph::{scc::Sccs, vec_graph::VecGraph};
+use rustc_data_structures::graph::scc::Sccs;
+use rustc_data_structures::graph::vec_graph::VecGraph;
 use rustc_index::Idx;
+use rustc_middle::span_bug;
 use rustc_middle::ty::error::TypeError;
-use rustc_middle::ty::relate::RelateResult;
+
+use super::*;
+use crate::infer::relate::RelateResult;
+use crate::infer::snapshot::CombinedSnapshot;
 
 impl<'tcx> RegionConstraintCollector<'_, 'tcx> {
     /// Searches new universes created during `snapshot`, looking for
@@ -275,7 +278,7 @@ impl<'a, 'b, 'tcx> LeakCheck<'a, 'b, 'tcx> {
         other_region: ty::Region<'tcx>,
     ) -> TypeError<'tcx> {
         debug!("error: placeholder={:?}, other_region={:?}", placeholder, other_region);
-        TypeError::RegionsInsufficientlyPolymorphic(placeholder.bound.kind, other_region)
+        TypeError::RegionsInsufficientlyPolymorphic(placeholder.bound, other_region)
     }
 }
 
@@ -382,7 +385,7 @@ impl<'tcx> MiniGraph<'tcx> {
                 edges.push((source_node, target_node));
             },
         );
-        let graph = VecGraph::new(nodes.len(), edges);
+        let graph = VecGraph::<_, false>::new(nodes.len(), edges);
         let sccs = Sccs::new(&graph);
         Self { nodes, sccs }
     }

@@ -11,16 +11,14 @@ use std::assert_matches::assert_matches;
 
 use itertools::Itertools;
 use rustc_hir as hir;
-use rustc_infer::infer::type_variable::{TypeVariableOrigin, TypeVariableOriginKind};
 use rustc_infer::infer::{BoundRegionConversionTime, RegionVariableOrigin};
 use rustc_middle::mir::*;
 use rustc_middle::ty::{self, Ty};
 use rustc_span::Span;
 
+use super::{Locations, TypeChecker};
 use crate::renumber::RegionCtxt;
 use crate::universal_regions::{DefiningTy, UniversalRegions};
-
-use super::{Locations, TypeChecker};
 
 impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
     /// Check explicit closure signature annotation,
@@ -74,12 +72,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 }),
             );
 
-            let next_ty_var = || {
-                self.infcx.next_ty_var(TypeVariableOrigin {
-                    span: body.span,
-                    kind: TypeVariableOriginKind::MiscVariable,
-                })
-            };
+            let next_ty_var = || self.infcx.next_ty_var(body.span);
             let output_ty = Ty::new_coroutine(
                 self.tcx(),
                 self.tcx().coroutine_for_closure(mir_def_id),
@@ -104,7 +97,7 @@ impl<'a, 'tcx> TypeChecker<'a, 'tcx> {
                 user_provided_sig.inputs().iter().copied(),
                 output_ty,
                 user_provided_sig.c_variadic,
-                user_provided_sig.unsafety,
+                user_provided_sig.safety,
                 user_provided_sig.abi,
             );
         }

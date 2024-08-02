@@ -1,5 +1,4 @@
 // Matching against NaN should result in an error
-#![feature(exclusive_range_pattern)]
 #![allow(unused)]
 
 const NAN: f64 = f64::NAN;
@@ -29,13 +28,9 @@ fn main() {
     // Also cover range patterns
     match x {
         NAN..=1.0 => {}, //~ ERROR cannot use NaN in patterns
-        //~^ ERROR lower range bound must be less than or equal to upper
         -1.0..=NAN => {}, //~ ERROR cannot use NaN in patterns
-        //~^ ERROR lower range bound must be less than or equal to upper
         NAN.. => {}, //~ ERROR cannot use NaN in patterns
-        //~^ ERROR lower range bound must be less than or equal to upper
         ..NAN => {}, //~ ERROR cannot use NaN in patterns
-        //~^ ERROR lower range bound must be less than upper
         _ => {},
     };
 }

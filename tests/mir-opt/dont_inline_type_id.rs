@@ -1,9 +1,8 @@
 // skip-filecheck
-//@ unit-test: Inline
+//@ test-mir-pass: Inline
 //@ compile-flags: --crate-type=lib -C panic=abort
 
-use std::any::Any;
-use std::any::TypeId;
+use std::any::{Any, TypeId};
 
 struct A<T: ?Sized + 'static> {
     a: i32,

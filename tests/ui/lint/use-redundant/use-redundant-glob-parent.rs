@@ -1,5 +1,5 @@
 //@ check-pass
-#![warn(unused_imports)]
+#![warn(redundant_imports)]
 
 pub mod bar {
     pub struct Foo(pub Bar);

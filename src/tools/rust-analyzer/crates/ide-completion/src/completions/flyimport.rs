@@ -1,11 +1,11 @@
 //! See [`import_on_the_fly`].
-use hir::{ItemInNs, ModuleDef};
+use hir::{ImportPathConfig, ItemInNs, ModuleDef};
 use ide_db::imports::{
     import_assets::{ImportAssets, LocatedImport},
     insert_use::ImportScope,
 };
 use itertools::Itertools;
-use syntax::{ast, AstNode, SyntaxNode, T};
+use syntax::{ast, AstNode, SyntaxNode, ToSmolStr, T};
 
 use crate::{
     context::{
@@ -207,8 +207,7 @@ fn import_on_the_fly(
     position: SyntaxNode,
     potential_import_name: String,
 ) -> Option<()> {
-    let _p =
-        tracing::span!(tracing::Level::INFO, "import_on_the_fly", ?potential_import_name).entered();
+    let _p = tracing::info_span!("import_on_the_fly", ?potential_import_name).entered();
 
     ImportScope::find_insert_use_container(&position, &ctx.sema)?;
 
@@ -257,13 +256,14 @@ fn import_on_the_fly(
     };
     let user_input_lowercased = potential_import_name.to_lowercase();
 
+    let import_cfg = ImportPathConfig {
+        prefer_no_std: ctx.config.prefer_no_std,
+        prefer_prelude: ctx.config.prefer_prelude,
+        prefer_absolute: ctx.config.prefer_absolute,
+    };
+
     import_assets
-        .search_for_imports(
-            &ctx.sema,
-            ctx.config.insert_use.prefix_kind,
-            ctx.config.prefer_no_std,
-            ctx.config.prefer_prelude,
-        )
+        .search_for_imports(&ctx.sema, import_cfg, ctx.config.insert_use.prefix_kind)
         .filter(ns_filter)
         .filter(|import| {
             let original_item = &import.original_item;
@@ -296,8 +296,7 @@ fn import_on_the_fly_pat_(
     position: SyntaxNode,
     potential_import_name: String,
 ) -> Option<()> {
-    let _p = tracing::span!(tracing::Level::INFO, "import_on_the_fly_pat", ?potential_import_name)
-        .entered();
+    let _p = tracing::info_span!("import_on_the_fly_pat_", ?potential_import_name).entered();
 
     ImportScope::find_insert_use_container(&position, &ctx.sema)?;
 
@@ -308,13 +307,14 @@ fn import_on_the_fly_pat_(
     };
     let user_input_lowercased = potential_import_name.to_lowercase();
 
+    let cfg = ImportPathConfig {
+        prefer_no_std: ctx.config.prefer_no_std,
+        prefer_prelude: ctx.config.prefer_prelude,
+        prefer_absolute: ctx.config.prefer_absolute,
+    };
+
     import_assets
-        .search_for_imports(
-            &ctx.sema,
-            ctx.config.insert_use.prefix_kind,
-            ctx.config.prefer_no_std,
-            ctx.config.prefer_prelude,
-        )
+        .search_for_imports(&ctx.sema, cfg, ctx.config.insert_use.prefix_kind)
         .filter(ns_filter)
         .filter(|import| {
             let original_item = &import.original_item;
@@ -347,21 +347,20 @@ fn import_on_the_fly_method(
     position: SyntaxNode,
     potential_import_name: String,
 ) -> Option<()> {
-    let _p =
-        tracing::span!(tracing::Level::INFO, "import_on_the_fly_method", ?potential_import_name)
-            .entered();
+    let _p = tracing::info_span!("import_on_the_fly_method", ?potential_import_name).entered();
 
     ImportScope::find_insert_use_container(&position, &ctx.sema)?;
 
     let user_input_lowercased = potential_import_name.to_lowercase();
 
+    let cfg = ImportPathConfig {
+        prefer_no_std: ctx.config.prefer_no_std,
+        prefer_prelude: ctx.config.prefer_prelude,
+        prefer_absolute: ctx.config.prefer_absolute,
+    };
+
     import_assets
-        .search_for_imports(
-            &ctx.sema,
-            ctx.config.insert_use.prefix_kind,
-            ctx.config.prefer_no_std,
-            ctx.config.prefer_prelude,
-        )
+        .search_for_imports(&ctx.sema, cfg, ctx.config.insert_use.prefix_kind)
         .filter(|import| {
             !ctx.is_item_hidden(&import.item_to_import)
                 && !ctx.is_item_hidden(&import.original_item)
@@ -397,13 +396,8 @@ fn import_assets_for_path(
     potential_import_name: &str,
     qualifier: Option<ast::Path>,
 ) -> Option<ImportAssets> {
-    let _p = tracing::span!(
-        tracing::Level::INFO,
-        "import_assets_for_path",
-        ?potential_import_name,
-        ?qualifier
-    )
-    .entered();
+    let _p =
+        tracing::info_span!("import_assets_for_path", ?potential_import_name, ?qualifier).entered();
 
     let fuzzy_name_length = potential_import_name.len();
     let mut assets_for_path = ImportAssets::for_fuzzy_path(
@@ -430,7 +424,7 @@ fn compute_fuzzy_completion_order_key(
     cov_mark::hit!(certain_fuzzy_order_test);
     let import_name = match proposed_mod_path.segments().last() {
         // FIXME: nasty alloc, this is a hot path!
-        Some(name) => name.to_smol_str().to_ascii_lowercase(),
+        Some(name) => name.display_no_db().to_smolstr().to_ascii_lowercase(),
         None => return usize::MAX,
     };
     match import_name.match_indices(user_input_lowercased).next() {

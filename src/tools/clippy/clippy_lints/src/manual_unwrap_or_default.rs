@@ -1,13 +1,14 @@
-use clippy_utils::sugg::Sugg;
 use rustc_errors::Applicability;
 use rustc_hir::def::Res;
 use rustc_hir::{Arm, Expr, ExprKind, HirId, LangItem, MatchSource, Pat, PatKind, QPath};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
+use rustc_middle::ty::GenericArgKind;
 use rustc_session::declare_lint_pass;
 use rustc_span::sym;
 
 use clippy_utils::diagnostics::span_lint_and_sugg;
-use clippy_utils::source::snippet_opt;
+use clippy_utils::higher::IfLetOrMatch;
+use clippy_utils::sugg::Sugg;
 use clippy_utils::ty::implements_trait;
 use clippy_utils::{in_constant, is_default_equivalent, peel_blocks, span_contains_comment};
 
@@ -42,7 +43,7 @@ declare_clippy_lint! {
     /// let x: Option<Vec<String>> = Some(Vec::new());
     /// let y: Vec<String> = x.unwrap_or_default();
     /// ```
-    #[clippy::version = "1.78.0"]
+    #[clippy::version = "1.79.0"]
     pub MANUAL_UNWRAP_OR_DEFAULT,
     suspicious,
     "check if a `match` or `if let` can be simplified with `unwrap_or_default`"
@@ -52,19 +53,15 @@ declare_lint_pass!(ManualUnwrapOrDefault => [MANUAL_UNWRAP_OR_DEFAULT]);
 
 fn get_some<'tcx>(cx: &LateContext<'tcx>, pat: &Pat<'tcx>) -> Option<HirId> {
     if let PatKind::TupleStruct(QPath::Resolved(_, path), &[pat], _) = pat.kind
+        && let PatKind::Binding(_, pat_id, _, _) = pat.kind
         && let Some(def_id) = path.res.opt_def_id()
         // Since it comes from a pattern binding, we need to get the parent to actually match
         // against it.
         && let Some(def_id) = cx.tcx.opt_parent(def_id)
-        && cx.tcx.lang_items().get(LangItem::OptionSome) == Some(def_id)
+        && (cx.tcx.lang_items().get(LangItem::OptionSome) == Some(def_id)
+        || cx.tcx.lang_items().get(LangItem::ResultOk) == Some(def_id))
     {
-        let mut bindings = Vec::new();
-        pat.each_binding(|_, id, _, _| bindings.push(id));
-        if let &[id] = bindings.as_slice() {
-            Some(id)
-        } else {
-            None
-        }
+        Some(pat_id)
     } else {
         None
     }
@@ -77,6 +74,14 @@ fn get_none<'tcx>(cx: &LateContext<'tcx>, arm: &Arm<'tcx>) -> Option<&'tcx Expr<
         // against it.
         && let Some(def_id) = cx.tcx.opt_parent(def_id)
         && cx.tcx.lang_items().get(LangItem::OptionNone) == Some(def_id)
+    {
+        Some(arm.body)
+    } else if let PatKind::TupleStruct(QPath::Resolved(_, path), _, _)= arm.pat.kind
+        && let Some(def_id) = path.res.opt_def_id()
+        // Since it comes from a pattern binding, we need to get the parent to actually match
+        // against it.
+        && let Some(def_id) = cx.tcx.opt_parent(def_id)
+        && cx.tcx.lang_items().get(LangItem::ResultErr) == Some(def_id)
     {
         Some(arm.body)
     } else if let PatKind::Wild = arm.pat.kind {
@@ -105,19 +110,39 @@ fn get_some_and_none_bodies<'tcx>(
     }
 }
 
-fn handle_match<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> bool {
-    let ExprKind::Match(match_expr, [arm1, arm2], MatchSource::Normal | MatchSource::ForLoopDesugar) = expr.kind else {
-        return false;
+#[allow(clippy::needless_pass_by_value)]
+fn handle<'tcx>(cx: &LateContext<'tcx>, if_let_or_match: IfLetOrMatch<'tcx>, expr: &'tcx Expr<'tcx>) {
+    // Get expr_name ("if let" or "match" depending on kind of expression),  the condition, the body for
+    // the some arm, the body for the none arm and the binding id of the some arm
+    let (expr_name, condition, body_some, body_none, binding_id) = match if_let_or_match {
+        IfLetOrMatch::Match(condition, [arm1, arm2], MatchSource::Normal | MatchSource::ForLoopDesugar)
+            // Make sure there are no guards to keep things simple
+            if arm1.guard.is_none()
+                && arm2.guard.is_none()
+                // Get the some and none bodies and the binding id of the some arm
+                && let Some(((body_some, binding_id), body_none)) = get_some_and_none_bodies(cx, arm1, arm2) =>
+        {
+            ("match", condition, body_some, body_none, binding_id)
+        },
+        IfLetOrMatch::IfLet(condition, pat, if_expr, Some(else_expr), _)
+            if let Some(binding_id) = get_some(cx, pat) =>
+        {
+            ("if let", condition, if_expr, else_expr, binding_id)
+        },
+        _ => {
+            // All other cases (match with number of arms != 2, if let without else, etc.)
+            return;
+        },
     };
-    // We don't want conditions on the arms to simplify things.
-    if arm1.guard.is_none()
-        && arm2.guard.is_none()
-        // We check that the returned type implements the `Default` trait.
-        && let match_ty = cx.typeck_results().expr_ty(expr)
-        && let Some(default_trait_id) = cx.tcx.get_diagnostic_item(sym::Default)
-        && implements_trait(cx, match_ty, default_trait_id, &[])
-        // We now get the bodies for both the `Some` and `None` arms.
-        && let Some(((body_some, binding_id), body_none)) = get_some_and_none_bodies(cx, arm1, arm2)
+
+    // We check if the return type of the expression implements Default.
+    let expr_type = cx.typeck_results().expr_ty(expr);
+    if let Some(default_trait_id) = cx.tcx.get_diagnostic_item(sym::Default)
+        && implements_trait(cx, expr_type, default_trait_id, &[])
+        // We check if the initial condition implements Default.
+        && let Some(condition_ty) = cx.typeck_results().expr_ty(condition).walk().nth(1)
+        && let GenericArgKind::Type(condition_ty) = condition_ty.unpack()
+        && implements_trait(cx, condition_ty, default_trait_id, &[])
         // We check that the `Some(x) => x` doesn't do anything apart "returning" the value in `Some`.
         && let ExprKind::Path(QPath::Resolved(_, path)) = peel_blocks(body_some).kind
         && let Res::Local(local_id) = path.res
@@ -125,8 +150,9 @@ fn handle_match<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> bool {
         // We now check the `None` arm is calling a method equivalent to `Default::default`.
         && let body_none = peel_blocks(body_none)
         && is_default_equivalent(cx, body_none)
-        && let Some(receiver) = Sugg::hir_opt(cx, match_expr).map(Sugg::maybe_par)
+        && let Some(receiver) = Sugg::hir_opt(cx, condition).map(Sugg::maybe_par)
     {
+        // Machine applicable only if there are no comments present
         let applicability = if span_contains_comment(cx.sess().source_map(), expr.span) {
             Applicability::MaybeIncorrect
         } else {
@@ -136,45 +162,9 @@ fn handle_match<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) -> bool {
             cx,
             MANUAL_UNWRAP_OR_DEFAULT,
             expr.span,
-            "match can be simplified with `.unwrap_or_default()`",
+            format!("{expr_name} can be simplified with `.unwrap_or_default()`"),
             "replace it with",
             format!("{receiver}.unwrap_or_default()"),
-            applicability,
-        );
-    }
-    true
-}
-
-fn handle_if_let<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-    if let ExprKind::If(cond, if_block, Some(else_expr)) = expr.kind
-        && let ExprKind::Let(let_) = cond.kind
-        && let ExprKind::Block(_, _) = else_expr.kind
-        // We check that the returned type implements the `Default` trait.
-        && let match_ty = cx.typeck_results().expr_ty(expr)
-        && let Some(default_trait_id) = cx.tcx.get_diagnostic_item(sym::Default)
-        && implements_trait(cx, match_ty, default_trait_id, &[])
-        && let Some(binding_id) = get_some(cx, let_.pat)
-        // We check that the `Some(x) => x` doesn't do anything apart "returning" the value in `Some`.
-        && let ExprKind::Path(QPath::Resolved(_, path)) = peel_blocks(if_block).kind
-        && let Res::Local(local_id) = path.res
-        && local_id == binding_id
-        // We now check the `None` arm is calling a method equivalent to `Default::default`.
-        && let body_else = peel_blocks(else_expr)
-        && is_default_equivalent(cx, body_else)
-        && let Some(if_let_expr_snippet) = snippet_opt(cx, let_.init.span)
-    {
-        let applicability = if span_contains_comment(cx.sess().source_map(), expr.span) {
-            Applicability::MaybeIncorrect
-        } else {
-            Applicability::MachineApplicable
-        };
-        span_lint_and_sugg(
-            cx,
-            MANUAL_UNWRAP_OR_DEFAULT,
-            expr.span,
-            "if let can be simplified with `.unwrap_or_default()`",
-            "replace it with",
-            format!("{if_let_expr_snippet}.unwrap_or_default()"),
             applicability,
         );
     }
@@ -182,11 +172,11 @@ fn handle_if_let<'tcx>(cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
 
 impl<'tcx> LateLintPass<'tcx> for ManualUnwrapOrDefault {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-        if expr.span.from_expansion() || in_constant(cx, expr.hir_id) {
-            return;
-        }
-        if !handle_match(cx, expr) {
-            handle_if_let(cx, expr);
+        if let Some(if_let_or_match) = IfLetOrMatch::parse(cx, expr)
+            && !expr.span.from_expansion()
+            && !in_constant(cx, expr.hir_id)
+        {
+            handle(cx, if_let_or_match, expr);
         }
     }
 }
