@@ -274,10 +274,10 @@ than building it.
             }
 
             if !has_target {
-                panic!(
-                    "No such target exists in the target list,
-                specify a correct location of the JSON specification file for custom targets!"
-                );
+                // panic!(
+                //     "No such target exists in the target list,
+                // specify a correct location of the JSON specification file for custom targets!"
+                // );
             }
         }
 
