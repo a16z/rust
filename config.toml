@@ -1,4 +1,4 @@
-changelog-seen = 2
+change-id = 125181
 
 [build]
 target = ["riscv32i-jolt-zkvm-elf"]
@@ -12,4 +12,3 @@ llvm-tools = true
 
 [llvm]
 download-ci-llvm = false
-

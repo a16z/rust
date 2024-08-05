@@ -22,7 +22,7 @@ jobs:
         id: rustc-toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly-2024-01-25
+          toolchain: nightly-2024-07-30
           default: true
 
       - uses: lukka/get-cmake@v3.27.4
