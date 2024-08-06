@@ -33,13 +33,11 @@ jobs:
           rustup toolchain list
 
       - name: Check out a16z/rust
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
         with:
-          repository: a16z/rust
           submodules: "recursive"
           path: rust
           fetch-depth: 0
-          ref: jolt
 
       - name: Build
         run: make build-toolchain
