@@ -37,7 +37,6 @@ jobs:
         with:
           submodules: "recursive"
           path: rust
-          fetch-depth: 0
 
       - name: Build
         run: make build-toolchain
