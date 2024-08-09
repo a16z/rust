@@ -77,5 +77,5 @@ package.json
 ## Rustdoc GUI tests
 tests/rustdoc-gui/src/**.lock
 
-# Arhive
+# Archive
 toolchain.tar.gz
