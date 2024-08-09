@@ -30,8 +30,6 @@ Session.vim
 !/tests/run-make/thumb-none-qemu/example/.cargo
 
 ## Configuration
-/config.toml
-/Makefile
 config.mk
 config.stamp
 no_llvm_build
@@ -79,4 +77,5 @@ package.json
 ## Rustdoc GUI tests
 tests/rustdoc-gui/src/**.lock
 
-# Before adding new lines, see the comment at the top.
+# Archive
+toolchain.tar.gz
