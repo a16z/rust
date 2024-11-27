@@ -9,8 +9,7 @@ Zulip stream. We have lots of docs below of how to get started on your own, but
 the Zulip stream is the best place to *ask* for help.
 
 Documentation for contributing to the compiler or tooling is located in the [Guide to Rustc
-Development][rustc-dev-guide], commonly known as the [rustc-dev-guide]. Documentation for the
-standard library in the [Standard library developers Guide][std-dev-guide], commonly known as the [std-dev-guide].
+Development][rustc-dev-guide], commonly known as the [rustc-dev-guide]. Documentation for the standard library is located in the [Standard library developers Guide][std-dev-guide], commonly known as the [std-dev-guide].
 
 ## About the [rustc-dev-guide]
 
