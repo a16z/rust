@@ -5,8 +5,11 @@ target = ["riscv32im-jolt-zkvm-elf"]
 extended = true
 tools = ["cargo", "cargo-clippy", "clippy", "rustfmt"]
 configure-args = []
+# TODO(sagar): enable compiler-builtins
+optimized-compiler-builtins = false
 
 [rust]
+channel = "stable"
 lld = true
 llvm-tools = true
 

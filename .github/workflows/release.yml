@@ -50,7 +50,7 @@ jobs:
       - name: Generate tag name
         id: tag
         run: |
-          echo "::set-output name=release_tag::nightly-${GITHUB_SHA}"
+          echo "::set-output name=release_tag::stable-${GITHUB_SHA}"
 
       - name: Release
         uses: softprops/action-gh-release@v1
