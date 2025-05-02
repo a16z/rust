@@ -16,6 +16,8 @@ jobs:
             triple: x86_64-apple-darwin
           - os: ubuntu-latest
             triple: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            triple: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
       - name: Install nightly toolchain
