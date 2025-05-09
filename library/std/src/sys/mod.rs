@@ -16,6 +16,7 @@ pub mod io;
 pub mod net;
 pub mod os_str;
 pub mod path;
+#[path = "./random/unsupported.rs"]
 pub mod random;
 pub mod sync;
 pub mod thread_local;

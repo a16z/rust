@@ -16,7 +16,7 @@ jobs:
             triple: x86_64-apple-darwin
           - os: ubuntu-latest
             triple: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
+          - os: ubuntu-22.04-arm
             triple: aarch64-unknown-linux-gnu
     runs-on: ${{ matrix.os }}
     steps:
@@ -24,7 +24,7 @@ jobs:
         id: rustc-toolchain
         uses: actions-rs/toolchain@v1
         with:
-          toolchain: nightly-2024-09-30
+          toolchain: nightly-2025-01-25
           default: true
 
       - uses: lukka/get-cmake@v3.27.4
