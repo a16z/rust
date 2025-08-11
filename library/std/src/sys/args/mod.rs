@@ -33,10 +33,7 @@ cfg_if::cfg_if! {
         pub use wasi::*;
     } else if #[cfg(target_os = "xous")] {
         mod xous;
-        pub use xous::*;
-    } else if #[cfg(target_os = "zkvm")] {
-        mod zkvm;
-        pub use zkvm::*;
+        pub use xous::*; 
     } else {
         mod unsupported;
         pub use unsupported::*;

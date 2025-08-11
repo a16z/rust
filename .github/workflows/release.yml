@@ -1,0 +1,73 @@
+name: release
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+          - { os: macos-14, triple: aarch64-apple-darwin }
+          - { os: macos-13, triple: x86_64-apple-darwin }
+          - { os: ubuntu-latest, triple: x86_64-unknown-linux-gnu }
+          - { os: ubuntu-22.04-arm, triple: aarch64-unknown-linux-gnu }
+        channel: [stable, nightly]
+    runs-on: ${{ matrix.config.os }}
+    steps:
+      - name: Install nightly toolchain
+        id: rustc-toolchain
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: nightly-2025-08-04
+          default: true
+
+      - uses: lukka/get-cmake@v3.27.4
+
+      - name: Show rust version
+        run: |
+          cargo version
+          rustup toolchain list
+
+      - name: Check out a16z/rust
+        uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+          path: rust
+
+      - name: Configure Rust build
+        run: |
+          ./configure \
+            --set change-id="ignore" \
+            --target "${{ matrix.config.triple }},riscv32im-jolt-zkvm-elf,riscv64imac-jolt-zkvm-elf" \
+            --tools "cargo,cargo-clippy,clippy,rustfmt" \
+            --release-channel="${{ matrix.channel }}" \
+            --set rust.lld \
+            --set rust.llvm-tools \
+            --set build.extended \
+            --set llvm.download-ci-llvm=false \
+            --set build.optimized-compiler-builtins=false
+        working-directory: rust
+
+      - name: Build
+        run: |
+          export GITHUB_ACTIONS=false
+          export CARGO_TARGET_RISCV32IM_JOLT_ZKVM_ELF_RUSTFLAGS="-Cpasses=lower-atomic"
+          ./x.py build --stage 2
+        working-directory: rust
+
+      - name: Archive
+        run: tar -czvf rust-toolchain-${{ matrix.channel }}-${{ matrix.config.triple }}.tar.gz rust/build/host/stage2
+
+      - name: Upload Release Assets
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: ${{ matrix.channel }}-${{ github.sha }}
+          name: "Rust Toolchain - ${{ matrix.channel }} - ${{ github.sha }}"
+          prerelease: true
+          files: |
+              rust-toolchain-${{ matrix.channel }}-${{ matrix.config.triple }}.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,4 +1,4 @@
-//! System bindings for the risc0 zkvm platform
+//! System bindings for the jolt zkvm platform
 //!
 //! This module contains the facade (aka platform-specific) implementations of
 //! OS level functionality for zkvm.
@@ -8,9 +8,8 @@
 //! will likely change over time.
 #![forbid(unsafe_op_in_unsafe_fn)]
 
-pub const WORD_SIZE: usize = size_of::<u32>();
-
 pub mod abi;
+#[path = "../unsupported/os.rs"]
 pub mod os;
 #[path = "../unsupported/pipe.rs"]
 pub mod pipe;
