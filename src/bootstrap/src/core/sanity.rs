@@ -38,6 +38,7 @@ const STAGE0_MISSING_TARGETS: &[&str] = &[
     "loongarch32-unknown-none-softfloat",
     "riscv32im-jolt-zkvm-elf",
     "riscv64imac-jolt-zkvm-elf",
+    "riscv64im-jolt-zkvm-elf",
 ];
 
 /// Minimum version threshold for libstdc++ required when using prebuilt LLVM
